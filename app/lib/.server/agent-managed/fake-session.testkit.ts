@@ -229,7 +229,7 @@ export function createFakeManagedClient(script: Script = async (api) => api.endT
   const retrieve = async (id: string) => {
     const s = requireSession(id);
     const agentParams = s.createParams.agent as
-      | { type?: string; id?: string; model?: { id?: string; effort?: string } }
+      | { type?: string; id?: string; model?: { id?: string; effort?: string }; tools?: unknown[] }
       | undefined;
     const agentId = agentParams?.id;
     const model = agentId ? state.agentModels[agentId] : undefined;
@@ -237,9 +237,14 @@ export function createFakeManagedClient(script: Script = async (api) => api.endT
     /* Like the live API (T1): an `agent_with_overrides` session reads back the effort it was created with. */
     const effort = agentParams?.model?.effort ?? 'medium';
 
+    /* And the tool list it runs with — the create override, or a later `sessions.update` (managed-only D7). */
+    const tools = agentParams?.tools ? { tools: agentParams.tools } : {};
+
     return {
       id: s.id,
-      ...(model ? { agent: { type: agentParams?.type ?? 'agent', id: agentId, model: { id: model, effort } } } : {}),
+      ...(model
+        ? { agent: { type: agentParams?.type ?? 'agent', id: agentId, model: { id: model, effort }, ...tools } }
+        : {}),
       status: s.status,
       archived_at: s.archivedAt,
       budget: s.budget,
@@ -278,7 +283,19 @@ export function createFakeManagedClient(script: Script = async (api) => api.endT
         retrieve,
         update: async (id: string, params: Record<string, unknown>) => {
           updates.push({ sessionId: id, params });
-          requireSession(id).budget = params.budget ?? null;
+
+          const session = requireSession(id);
+
+          /* Like the live API: an omitted field is preserved — a tools-only update leaves the budget alone. */
+          if ('budget' in params) {
+            session.budget = params.budget ?? null;
+          }
+
+          const agentUpdate = params.agent as { tools?: unknown[] } | undefined;
+
+          if (agentUpdate?.tools) {
+            session.createParams.agent = { ...(session.createParams.agent as object), tools: agentUpdate.tools };
+          }
 
           return retrieve(id);
         },

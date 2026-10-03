@@ -69,59 +69,10 @@ const DELIVERY: Record<PlatformProviderName, DeliveryMode | Record<ModelFamily, 
   /* Measured streaming live during the window (`KIE_BUG_REPORT.md`, 2026-07-24 control). ALL families. */
   Anthropic: 'streamed',
 
-  KIE: {
-    /* Measured 3/3 buffered, 2026-08-03. See the table above. */
-    claude: 'batched',
-
-    /*
-     * ✅ Measured streaming, twice. 2026-08-04 big-answer run on `gpt-5-6-sol`: 46,498ms total,
-     * **2,382 deltas**, first delta at 3,016ms (6% in), spread over 42,865ms, and **1.0% of chars in
-     * the final second**. That last number is the one that matters — it is what separates "streamed
-     * for 46s" from "buffered for 46s and arrived at 46s", which no server-side total can tell apart.
-     */
-    codex: 'streamed',
-
-    /*
-     * ✅ CONFIRMED 2026-08-04 by the big-answer probe this entry was provisional pending (T11).
-     * `gemini-3-5-flash`, 12,542ms total, 19 deltas, 6,828 chars, first delta at 5,650ms (45% in),
-     * **6.8% of chars in the final second** — progressive, not a final-second flush.
-     *
-     * Fewer, fatter deltas than codex's 2,382, so the panel's expectation bar will move in coarser
-     * steps; that is a streaming shape, not a batched one. **This entry is DATA — re-measure with
-     * `scripts/stream-probe.mjs gemini-3-5-flash` and flip the one word if KIE's adapter changes.**
-     */
-    gemini: 'streamed',
-
-    /*
-     * UNREACHABLE on KIE and present only so this exhaustive Record compiles: `kie.ts` refuses the
-     * `chat` family at model resolution (KIE fronts no Grok/Kimi/Qwen/GLM/DeepSeek/MiniMax ids), so
-     * nothing can ever read this value. It is `streamed` because that is the standing default for an
-     * unmeasured surface — NOT because anything was measured here.
-     */
-    chat: 'streamed',
-  },
-
-  Comet: {
-    /*
-     * ✅ MEASURED 2026-08-10, and it is the headline difference from KIE's row above: the same Claude
-     * models over the same Anthropic-native Messages API, streaming properly. `stream-probe.mjs`:
-     * 5,825 chars over **388 deltas** with **4% of characters in the final second** — that last number
-     * is the one that separates "streamed for N seconds" from "buffered for N seconds and flushed",
-     * which no server-side total can tell apart. KIE's Claude adapter measures 100% on that number.
-     */
-    claude: 'streamed',
-
-    /*
-     * ⚠️ ASSUMED, NOT MEASURED — the standing default for an unprobed surface. `batched` renders a
-     * sentence telling the user to expect nothing for minutes; claiming that about something nobody
-     * has watched manufactures the despair the panel exists to prevent, and it is unfalsifiable from
-     * their side of the screen. Do not read these three as evidence: if a rung ever names a model in
-     * one of these families, MEASURE it with `scripts/stream-probe.mjs` and flip the word.
-     */
-    codex: 'streamed',
-    chat: 'streamed',
-    gemini: 'streamed',
-  },
+  /*
+   * A KIE row lived here until 2026-10-03 (KIE's Claude adapter measured 3/3 BUFFERED — the reason this
+   * module exists). Anthropic is the only LLM provider now (`_specs/anthropic-only_plan.md`).
+   */
 };
 
 /**

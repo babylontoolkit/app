@@ -43,6 +43,8 @@ import {
 } from '~/lib/.server/agent/proxy';
 import type { GenerationUsage } from '~/lib/.server/agent/step-usage';
 import { cancelGenerationToolCalls } from '~/lib/.server/agent/mcp-relay';
+import type { McpLiveTool, McpToolCallEvent } from '~/lib/.server/agent/mcp-tools';
+import { NO_REPLAY, PLAN_MODE } from '~/types/message-marks';
 import type { PreviewToolCallEvent } from '~/lib/.server/agent/preview-tools';
 import { EMPTY_RESPONSE_ERROR } from '~/lib/.server/agent/retry-policy';
 import { resolveToolLoopConfig, resolveTurnCeiling } from '~/lib/.server/agent/tool-loop';
@@ -78,6 +80,7 @@ import type { ApiUsageLike } from './session-cost';
 import { recordManagedBuildPhases } from './build-complete';
 import { ensureManagedAgentRecord, getManagedAgentRecord } from './provision';
 import { REFERENCE_MOUNT_PATH } from './system-prompt';
+import { MANAGED_BUILTIN_TOOLSET, MANAGED_CUSTOM_TOOLS } from './tools';
 import { getManagedSettledAt, getOrCreateManagedSession, ManagedSessionError } from './sessions';
 import { inspectSession, SUPERSEDE_WAIT_MS, supersedePendingTurn } from './session-health';
 import {
@@ -107,9 +110,10 @@ const CARRIED_CHARGE_LABEL = `${MANAGED_CHARGE_LABEL} — carried over`;
  * What a managed turn needs — the subset of `AgentRequest` that means something on this engine.
  *
  * Absent on purpose: BYOK (`apiKeys`/`providerSettings`/`model` — Managed Agents runs on the platform's
- * Anthropic key only, D8), `chatMode` (a Plan turn never reaches this engine, `engine-select.ts`), MCP
- * tools (same), and the legacy prompt-assembly inputs (`toolkitSystems`, `creationPhase`, `gameBackend`,
- * `assetNotes`) that T9 re-introduces as first-message guidance where they still apply.
+ * Anthropic key only, D8), and the legacy prompt-assembly inputs (`toolkitSystems`, `creationPhase`,
+ * `gameBackend`, `assetNotes`) that T9 re-introduces as first-message guidance where they still apply.
+ * `chatMode` and `mcpTools` arrived 2026-10-03 (`_specs/managed-only_plan.md`): Plan turns and MCP turns
+ * run here too.
  */
 export interface ManagedTurnRequest {
   messages: Message[];
@@ -160,6 +164,33 @@ export interface ManagedTurnRequest {
 
   /** T6: re-attach to a session waiting on tool results rather than sending a new user message. */
   resume?: boolean;
+
+  /**
+   * The chat's Build/Plan toggle (§4.2.9) — untrusted; only the exact `'discuss'` is a Plan turn, which is
+   * read-only by the dispatcher's wall (`planMode`, managed-only plan D1). Anything else is a Build turn.
+   */
+  chatMode?: string;
+
+  /**
+   * The project's MCP tools running in the user's sandbox (§4.14) — untrusted and third-party; reached through
+   * `mcp_list_tools` / `mcp_call` (managed-only plan D4). The sandbox's own server validates every call.
+   */
+  mcpTools?: McpLiveTool[];
+}
+
+/**
+ * The tool list every NEW session is created with (managed-only plan D7) — the agent's own, current as of this
+ * deploy, so a tool added since the last Synchronize (`mcp_*`) works before an admin re-provisions.
+ */
+export function currentSessionTools() {
+  return [
+    {
+      ...MANAGED_BUILTIN_TOOLSET,
+      default_config: { ...MANAGED_BUILTIN_TOOLSET.default_config },
+      configs: MANAGED_BUILTIN_TOOLSET.configs.map((config) => ({ ...config })),
+    },
+    ...MANAGED_CUSTOM_TOOLS.map((tool) => ({ ...tool })),
+  ];
 }
 
 /**
@@ -200,7 +231,7 @@ function gateRefusal(message: string | undefined): Error {
 }
 
 export const NOT_PROVISIONED_HINT =
-  'An admin must press Synchronize (it provisions) or "Provision managed agent" (Settings → Admin → Prompt) before the managed engine can run a turn — or set AGENT_ENGINE=legacy.';
+  'An admin must press Synchronize (it provisions) or "Provision managed agent" (Settings → Admin → Prompt) before the managed engine can run a turn.';
 
 /**
  * The turn's outcome facts (`describeTurnOutcome`). Pure.
@@ -292,6 +323,14 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
   });
 
   /*
+   * A Plan turn (§4.2.9, managed-only plan D1–D3): read-only by the dispatcher's wall, and never a build —
+   * no build phases, no finished build recorded, not judged as a first build that "wrote nothing" — even on a
+   * project that still owes its first build ("Plan my brief" plans that build instead of running it).
+   */
+  const isDiscussTurn = request.chatMode === 'discuss';
+  const isBuildingFirst = isFirstBuildTurn && !isDiscussTurn;
+
+  /*
    * 3. The model tier the user picked (§4.6.1a) — the SAME decision the legacy engine makes: a request,
    * honoured only when the rung is servable and the balance clears its threshold, else resolved DOWN to
    * Standard. Each rung is its own provisioned agent (a session's model is fixed for its life).
@@ -362,13 +401,13 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
   const generationId = `gen_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const startedAt = Date.now();
   const isRepair = Boolean(request.errors?.length);
-  const statusKind = statusKindFor({ isRepair, isFirstBuildTurn, isDiscussTurn: false });
+  const statusKind = statusKindFor({ isRepair, isFirstBuildTurn, isDiscussTurn });
 
   /*
    * T9: a first build is ONE managed turn that runs every owed phase, in order (design → game → front
    * end), listed as guidance in its message — not three requests. Read from the ROW's plan.
    */
-  const buildPhases: CreationPhaseId[] = isFirstBuildTurn && !isRepair ? managedBuildPhases(request.creationPlan) : [];
+  const buildPhases: CreationPhaseId[] = isBuildingFirst && !isRepair ? managedBuildPhases(request.creationPlan) : [];
 
   /*
    * The turn's credit ceiling as a session budget (D13): credits → USD list cost through the inverse of
@@ -416,6 +455,9 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
             id: agentRecord.agentId,
             version: agentRecord.agentVersion,
             model: { id: agentRecord.model, effort },
+
+            /* The CURRENT tool list (managed-only plan D7), not whatever the provisioned version carries. */
+            tools: currentSessionTools(),
           },
           environment_id: agentRecord.environmentId,
           title: `project ${projectId}`,
@@ -583,6 +625,27 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
     }
   }
 
+  /*
+   * An EXISTING session created before `mcp_*` existed has no MCP tools (managed-only plan D7): give it the
+   * current list on the first turn that carries MCP tools. The session is idle here (any pending turn was
+   * superseded above). Best effort — a failure leaves the session as it was and the turn runs without them.
+   */
+  if (
+    !request.resume &&
+    !sessionRef.created &&
+    (request.mcpTools?.length ?? 0) > 0 &&
+    inspection?.kind === 'live' &&
+    inspection.toolNames &&
+    !inspection.toolNames.includes('mcp_call')
+  ) {
+    try {
+      await client.beta.sessions.update(sessionRef.sessionId, { agent: { tools: currentSessionTools() } });
+      logger.info(`Session ${sessionRef.sessionId}: given the current tool list (it had no MCP tools)`);
+    } catch (error) {
+      logger.warn(`Session ${sessionRef.sessionId}: could not add the MCP tools: ${(error as Error)?.message}`);
+    }
+  }
+
   const userMessage = request.resume
     ? null
     : buildManagedUserMessage({
@@ -591,6 +654,8 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
         files: request.files,
         newSession: sessionRef.created,
         buildPhases,
+        planMode: isDiscussTurn,
+        mcpTools: request.mcpTools,
       });
 
   if (!request.resume && !userMessage) {
@@ -614,6 +679,7 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
   const previewListeners: Array<(event: PreviewToolCallEvent) => void> = [];
   const todoListeners: Array<(items: TodoItem[]) => void> = [];
   const mediaListeners: Array<(event: MediaTaskEvent) => void> = [];
+  const mcpListeners: Array<(event: McpToolCallEvent) => void> = [];
 
   /*
    * T8: the media tools, answered by the SERVER exactly as the legacy engine answers them (debit → task
@@ -653,6 +719,10 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
     emitWorkspace: (event) => workspaceListeners.forEach((listener) => listener(event)),
     emitPreview: (event) => previewListeners.forEach((listener) => listener(event)),
     emitTodos,
+    planMode: isDiscussTurn,
+    mcp: request.mcpTools?.length
+      ? { tools: request.mcpTools, emit: (event) => mcpListeners.forEach((listener) => listener(event)) }
+      : null,
     onBrowserTimeout: (call) => {
       if (!browserGone.signal.aborted) {
         logger.warn(
@@ -790,7 +860,7 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
         /* A finished, verified turn leaves no unchecked items (tool-loop T9, owner rule). */
         const facts = managedOutcomeFacts({
           end,
-          isFirstBuildTurn,
+          isFirstBuildTurn: isBuildingFirst,
           overlay,
           lastCheck: wsState.lastCheck,
           browserTimedOut: browserGone.signal.aborted && !request.abortSignal?.aborted,
@@ -815,7 +885,7 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
 
       const facts = managedOutcomeFacts({
         end,
-        isFirstBuildTurn,
+        isFirstBuildTurn: isBuildingFirst,
         overlay,
         lastCheck: wsState.lastCheck,
         browserTimedOut: browserGone.signal.aborted && !request.abortSignal?.aborted,
@@ -1010,7 +1080,9 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
 
     /* The session holds the history on Anthropic's side; nothing is re-sent, so there is nothing to meter. */
     historyStats: { messages: 0, chars: 0, attachments: 0, attachmentTokens: 0, maxTurns: 0 },
-    discussMode: false,
+
+    /* A Plan turn: the route writes PLAN_MODE then NO_REPLAY before any text (managed-only plan D3). */
+    discussMode: isDiscussTurn,
     statusKind,
     deliveryMode: 'streamed',
     currentActivity: () => null,
@@ -1021,7 +1093,7 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
     outcome: outcome.promise,
     settlement: settlementPromise.promise,
     workspaceSummary: workspaceSummary.promise,
-    onMcpToolCall: () => undefined,
+    onMcpToolCall: (listener) => mcpListeners.push(listener),
     onPreviewToolCall: (listener) => previewListeners.push(listener),
     onWorkspaceToolCall: (listener) => workspaceListeners.push(listener),
     onAgentTodos: (listener) => todoListeners.push(listener),
@@ -1081,6 +1153,8 @@ async function writeManagedTranscript(input: {
         role: 'assistant',
         content: input.narration,
         annotations: [
+          /* A Plan turn's marks, in the route's order, so its follow-up button survives a reload (D3). */
+          ...(input.generation.discussMode ? [PLAN_MODE, NO_REPLAY] : []),
           annotations.usage,
           annotations.agentMeta,
           ...(annotations.agentWorkspace ? [annotations.agentWorkspace] : []),

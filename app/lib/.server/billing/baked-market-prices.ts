@@ -100,7 +100,7 @@ export const BAKED_MARKET_PRICES: MarketPriceList = {
     /*
      * Opus 5.5 — KIE's public feed, 2026-09-29: $1.60 input / $8.00 output (320 / 1600 credits per
      * million). KIE lists NO Sonnet 5.5 and NO Fable 5.1 as of that date, so those two are absent on
-     * purpose: a rung naming them runs on Comet or Anthropic, which do price them.
+     * purpose. (KIE's LLM rows price nothing since 2026-10-03 — Anthropic is the only LLM provider.)
      */
     'claude-opus-5-5': { inputPerMTok: 1.6, outputPerMTok: 8.0 },
 

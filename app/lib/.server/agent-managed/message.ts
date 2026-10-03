@@ -15,7 +15,12 @@
  *     so far — the words only, capped, newest kept (`conversationRecap`). The new session has no memory
  *     of the old one, and without it "make the jump higher" arrives with no idea what game this is;
  *   - a FIRST BUILD (T9) appends the phase list (design → game → front end) as guidance after the
- *     user's words: the whole build is one managed turn, not three requests.
+ *     user's words: the whole build is one managed turn, not three requests;
+ *   - a PLAN turn (§4.2.9, `_specs/managed-only_plan.md` D2) is prefixed with the Plan-mode note — guidance
+ *     only, the wall is the dispatcher's — and the first Build turn after a Plan turn says Plan mode has
+ *     ended, because the session remembers the earlier note;
+ *   - a turn carrying the project's MCP tools says so in ONE line (D6), never the whole list — the session
+ *     keeps every message, so a per-turn list would grow the history every turn.
  */
 import type {
   BetaManagedAgentsImageBlock,
@@ -28,6 +33,9 @@ import type { FileMap } from '~/lib/.server/llm/constants';
 import { managedBuildGuidance, type CreationPhaseId } from '~/lib/agent/creation-plan';
 import { splitCarriedArtifact, stripTransportPrefix, userTypedText } from '~/lib/chat/message-envelope';
 import { toProjectRelativePath } from '~/lib/common/sandbox-paths';
+import { PLAN_ARTIFACTS_DIR } from '~/lib/chat/plan-artifacts';
+import type { McpLiveTool } from '~/lib/.server/agent/mcp-tools';
+import { PLAN_MODE } from '~/types/message-marks';
 
 /** The manifest's ceiling — a starter is ~80 files; a project with thousands is listed in part. */
 export const MANIFEST_MAX_PATHS = 800;
@@ -144,6 +152,67 @@ export function conversationRecap(messages: Message[]): string {
   );
 }
 
+/**
+ * The Plan-mode note for a managed turn — the managed wording of `discuss-note.ts` (it names THIS engine's
+ * tools). Guidance only: the read-only guarantee is the dispatcher's server-side wall (`planMode`).
+ */
+export function managedPlanNote(): string {
+  return [
+    '[Plan mode — this turn only]',
+    'The user switched this turn to PLAN mode: they want to plan, review, weigh options or understand the',
+    'code — not to change the project yet.',
+    '- Answer in prose (markdown is fine). Read the project freely with project_read / project_list /',
+    '  project_grep and quote short excerpts to ground the discussion.',
+    `- ONE write is allowed: planning files inside \`${PLAN_ARTIFACTS_DIR}/\` (for example`,
+    `  \`${PLAN_ARTIFACTS_DIR}/<feature>_spec.md\` or \`${PLAN_ARTIFACTS_DIR}/<feature>_plan.md\`) with project_write`,
+    '  or project_edit — use it when a skill (bt-spec, bt-plan) or the user asks for a spec or plan file.',
+    '  Writes anywhere else, commands, game checks, in-game evaluation, media generation and MCP calls are',
+    '  refused on this turn — never claim a file outside that folder was changed.',
+    '- If concrete changes come out of the discussion, END with a short numbered list of the proposed steps',
+    '  and tell the user to switch back to Build mode (or ask you to build it) when they are ready.',
+    '[End of Plan mode note]',
+  ].join('\n');
+}
+
+/** The first Build turn after a Plan turn: the session remembers the Plan note, so say it is over. */
+export const PLAN_MODE_ENDED_NOTE =
+  '[Build mode — Plan mode has ended. Change the project as the user asks, with every tool available.]';
+
+/** Was the conversation's previous assistant reply a Plan-mode turn (its server-written `PLAN_MODE` mark)? */
+export function previousTurnWasPlan(messages: Message[]): boolean {
+  let lastUserIndex = -1;
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user') {
+      lastUserIndex = i;
+      break;
+    }
+  }
+
+  for (let i = lastUserIndex - 1; i >= 0; i--) {
+    if (messages[i].role === 'assistant') {
+      const annotations = (messages[i] as { annotations?: unknown }).annotations;
+      return Array.isArray(annotations) && annotations.includes(PLAN_MODE);
+    }
+  }
+
+  return false;
+}
+
+/** The one-line notice that the project's MCP tools exist (D6). Empty when there are none. */
+export function mcpToolsNote(tools: readonly McpLiveTool[] | undefined): string {
+  if (!tools?.length) {
+    return '';
+  }
+
+  const servers = [...new Set(tools.map((t) => t.server))].sort();
+
+  return (
+    `[This project has ${tools.length} MCP tool(s) running in the user's sandbox (server(s): ` +
+    `${servers.join(', ')}). Call mcp_list_tools to see them and mcp_call to run one.]`
+  );
+}
+
 const DATA_URL = /^data:([^;,]+);base64,(.+)$/s;
 
 function imageBlocks(message: Message | undefined): BetaManagedAgentsImageBlock[] {
@@ -179,6 +248,12 @@ export interface ManagedMessageInput {
    * its errors, and the build it repairs already ran.
    */
   buildPhases?: readonly CreationPhaseId[];
+
+  /** A Plan-mode turn (§4.2.9): prefixed with `managedPlanNote` (D2). */
+  planMode?: boolean;
+
+  /** The project's live MCP tools (§4.14): announced in one line (D6). */
+  mcpTools?: readonly McpLiveTool[];
 }
 
 /** The turn's `user.message`, or `null` when there is nothing to send (no user text, no errors). */
@@ -201,11 +276,19 @@ export function buildManagedUserMessage(input: ManagedMessageInput): BetaManaged
   }
 
   const manifest = input.newSession ? `${projectManifest(input.files)}${conversationRecap(input.messages)}` : '';
-  const guidance = input.errors?.length ? '' : managedBuildGuidance(input.buildPhases ?? []);
+  const guidance = input.errors?.length || input.planMode ? '' : managedBuildGuidance(input.buildPhases ?? []);
   const words = body || '(see the attached image)';
+
+  /* The mode first (it governs everything below it), then the MCP notice — both before the user's words. */
+  const notes = [
+    input.planMode ? managedPlanNote() : previousTurnWasPlan(input.messages) ? PLAN_MODE_ENDED_NOTE : '',
+    mcpToolsNote(input.mcpTools),
+  ].filter(Boolean);
+  const prefix = notes.length ? `${notes.join('\n\n')}\n\n` : '';
+
   const text: BetaManagedAgentsTextBlock = {
     type: 'text',
-    text: `${manifest}${words}${guidance ? `\n\n${guidance}` : ''}`,
+    text: `${manifest}${prefix}${words}${guidance ? `\n\n${guidance}` : ''}`,
   };
 
   return { type: 'user.message', content: [text, ...images] };

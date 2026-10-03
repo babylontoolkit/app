@@ -36,6 +36,9 @@ export const MUTATING_TOOLS: ReadonlySet<string> = new Set([
   'project_run',
   'check_game',
   'update_todos',
+
+  /* A project MCP server can write files too (managed-only plan D5) — serialised with the project writes. */
+  'mcp_call',
 ]);
 
 /** How many times a dropped stream is reopened before the turn gives up. */

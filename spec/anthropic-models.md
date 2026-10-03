@@ -1,6 +1,6 @@
 # Anthropic Model Support — Rebuild Guide
 
-> **Engine scope (2026-10-01).** This guide covers the LEGACY engine's provider path (`@ai-sdk/anthropic`, `thinkingFetch`, the sampling-param strip), which still serves Plan mode, MCP turns and the prompt enhancer. The managed engine (SPEC §4.2) talks to Anthropic's Managed Agents API through `@anthropic-ai/sdk` 0.131.0; effort is set per SESSION at create (`agent_with_overrides` + `model:{id, effort}`) — the user's choice when the deploy offers it (§3.6a), else `MANAGED_AGENT_EFFORT` — and none of the wrappers here are in its path.
+> **Engine scope (2026-10-01).** This guide covers the LEGACY engine's provider path (`@ai-sdk/anthropic`, `thinkingFetch`, the sampling-param strip), which since 2026-10-03 serves only the `AGENT_ENGINE=legacy` kill switch — on a managed deploy Plan mode, MCP turns and the prompt enhancer run on Managed Agents too (`_specs/managed-only_plan.md`). The managed engine (SPEC §4.2) talks to Anthropic's Managed Agents API through `@anthropic-ai/sdk` 0.131.0; effort is set per SESSION at create (`agent_with_overrides` + `model:{id, effort}`) — the user's choice when the deploy offers it (§3.6a), else `MANAGED_AGENT_EFFORT` — and none of the wrappers here are in its path.
 
 How to wire current Claude models into this bolt.diy fork, and the three non-obvious
 failures you WILL hit if you only swap the model ID strings.

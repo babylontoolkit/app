@@ -35,7 +35,6 @@
     "sync:nodepod": "node scripts/sync-nodepod-assets.mjs",
     "prepare": "husky && node scripts/sync-nodepod-assets.mjs",
     "clean": "node scripts/clean.js",
-    "kie-health": "node scripts/kie-model-health.mjs",
     "electron:dev": "node scripts/electron-dev.mjs",
     "electron:dev:inspect": "NODE_ENV=development electron --inspect=9229 build/electron/main/index.mjs",
     "electron:build:deps": "concurrently \"pnpm electron:build:main\" \"pnpm electron:build:preload\" --kill-others-on-fail",

@@ -143,7 +143,7 @@ describe('GET /api/agent/managed/status', () => {
     expect(await response.json()).toEqual({ engine: 'managed', pending: true, userText: 'make it drift' });
   });
 
-  it('not pending once the turn ended (CONTROL), nor for a chat with no session, nor on the legacy engine', async () => {
+  it('not pending once the turn ended (CONTROL), nor for a chat with no session, and never another engine', async () => {
     fake.seed('sesn_done', [
       { type: 'user.message', content: [] },
       { type: 'agent.message', content: [] },
@@ -156,12 +156,10 @@ describe('GET /api/agent/managed/status', () => {
     });
     expect(await (await status(MINE, randomUUID())).json()).toEqual({ engine: 'managed', pending: false });
 
+    /* A stale AGENT_ENGINE=legacy cannot make the status report another engine (2026-10-03). */
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     vi.stubEnv('AGENT_ENGINE', 'legacy');
-    fake.seed('sesn_l', [{ type: 'agent.custom_tool_use', name: 'x', input: {} }]);
-    expect(await (await status(MINE, await chatWithSession(MINE, 'sesn_l'))).json()).toEqual({
-      engine: 'legacy',
-      pending: false,
-    });
+    expect(await (await status(MINE, randomUUID())).json()).toEqual({ engine: 'managed', pending: false });
   });
 
   it('walls: signed out → 401; another user’s project → 404; my project + another project’s chat → 404', async () => {

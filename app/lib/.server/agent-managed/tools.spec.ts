@@ -31,6 +31,8 @@ const FIXED_NAMES = [
   'generate_image',
   'generate_video',
   'generate_sound',
+  'mcp_list_tools',
+  'mcp_call',
 ];
 
 function props(name: string): Record<string, unknown> {
@@ -127,6 +129,12 @@ describe('managed custom tools', () => {
 
     // CONTROL: the comparison can fail — a name the legacy write_file does not read is rejected.
     expect(legacyKeys(workspace, 'write_file')).not.toContain('text');
+  });
+
+  it('give MCP two constant tools whose call names the server AND the tool (never a name alone)', () => {
+    expect(Object.keys(props('mcp_list_tools'))).toEqual([]);
+    expect(Object.keys(props('mcp_call'))).toEqual(['server', 'tool', 'arguments']);
+    expect(MANAGED_CUSTOM_TOOLS.find((t) => t.name === 'mcp_call')?.input_schema.required).toEqual(['server', 'tool']);
   });
 
   it('leave only read/glob/grep enabled in the built-in toolset', () => {

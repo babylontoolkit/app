@@ -2,8 +2,8 @@
  * fal.ai media client (SPEC §4.16, `_specs/media-gateways_plan.md` T3) — the wire half of renders on the
  * fal gateway: images, the transparency cut-out, and video.
  *
- * fal is a QUEUE, which is exactly the shape the seam already has (create → id → poll), so unlike
- * Comet nothing is parked in process memory and a deploy loses nothing:
+ * fal is a QUEUE, which is exactly the shape the seam already has (create → id → poll), so nothing is
+ * parked in process memory and a deploy loses nothing:
  *
  *  | step    | wire                                                         |
  *  |---------|--------------------------------------------------------------|
@@ -196,8 +196,8 @@ export class FalMediaProvider implements MediaProvider {
   }
 
   /**
-   * 🔴 EXPLICIT, never a fallthrough — the rule `kie-client.ts` and `comet-client.ts` follow. The
-   * endpoint vocabulary is shared and persisted, so a KIE or Comet task handed here must be refused,
+   * 🔴 EXPLICIT, never a fallthrough — the rule `kie-client.ts` follows. The endpoint vocabulary is
+   * shared and persisted, so a KIE (or retired-gateway) task handed here must be refused,
    * not POSTed to fal.
    */
   private _assertFalEndpoint(endpoint: MediaEndpoint): void {

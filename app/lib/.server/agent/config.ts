@@ -7,7 +7,7 @@
  */
 import { DEFAULT_MODEL } from '~/utils/constants';
 import { env, envFlag, NotConfiguredError } from '~/lib/.server/env';
-import { getModelTier, kieDefaultModel, nativeProviderRates, providerRates } from '~/lib/.server/billing/rates';
+import { getModelTier, nativeProviderRates, providerRates } from '~/lib/.server/billing/rates';
 import {
   ENABLE_EXTENDED_MODELS_ENV_KEY,
   modelTierEnabled,
@@ -23,10 +23,10 @@ const logger = createScopedLogger('platform-config');
 export { NotConfiguredError };
 
 /**
- * The providers the PLATFORM can pay for. All three serve the same Claude models over the same
- * Anthropic-native Messages API — KIE (`providers/kie.ts`) and Comet (`providers/cometapi.ts`) are
- * passthrough gateways, not different models — so switching is a cost/reliability decision, never a
- * capability or quality one.
+ * The providers the PLATFORM buys LLM tokens from — 🔴 ANTHROPIC ONLY since 2026-10-03 (owner,
+ * `_specs/anthropic-only_plan.md` D3: *"Anthropic Managed Agent SHOULD be the Only LLM_PROVIDER PATH and KIE
+ * and FAL should be the only media paths.. period"*). KIE was an LLM gateway until then and is a MEDIA
+ * provider only now. Every turn runs on Anthropic Managed Agents.
  *
  * ⚠️ Adding a name here is not enough. A provider the platform BILLS for must also have a row in
  * `PROVIDER_RATES` (`billing/rates.ts`), or every generation on it prices at Anthropic list — which
@@ -35,19 +35,17 @@ export { NotConfiguredError };
  * ⚠️ **And it must be added to every `Record<PlatformProviderName, …>` in the codebase, which the
  * compiler will tell you about — but NOT to any `provider === 'X' ? … : …` ternary, which it will
  * not.** Those existed here (key selection, default model, two operator-guidance strings) and every
- * one of them fell to the Anthropic side for an unrecognised provider: a Comet deploy would have
- * asked for the Anthropic key and reported the wrong fix for a misconfigured model. They are records
- * and exhaustive switches now, deliberately, so a fourth provider is a compile error rather than a
- * silent wrong answer.
+ * one of them fell to the Anthropic side for an unrecognised provider. They are records and exhaustive
+ * switches now, deliberately, so a new provider is a compile error rather than a silent wrong answer.
  */
-export const PLATFORM_PROVIDERS = ['Anthropic', 'KIE', 'Comet'] as const;
+export const PLATFORM_PROVIDERS = ['Anthropic'] as const;
 export type PlatformProviderName = (typeof PLATFORM_PROVIDERS)[number];
 
 /**
  * The providers that serve MEDIA renders (SPEC §4.16).
  *
  * Every one of them is EITHER a platform provider (KIE — one vendor, one key, both kinds of spend)
- * OR listed in `MEDIA_ONLY_PROVIDERS` (fal.ai, which renders and serves no LLM). That is the
+ * OR listed in `MEDIA_ONLY_PROVIDERS` (KIE and fal.ai since 2026-10-03 — neither serves the LLM). That is the
  * relation the specs assert; it replaced "a strict subset of the platform providers" when fal joined
  * (`_specs/media-gateways_plan.md` T3), because adding fal to `PLATFORM_PROVIDERS` would have offered
  * a gateway with no text model to the LLM ladder.
@@ -64,10 +62,10 @@ export type PlatformProviderName = (typeof PLATFORM_PROVIDERS)[number];
 export const MEDIA_PROVIDERS = ['KIE', 'FAL'] as const;
 
 /**
- * 🔴 **Comet is NOT a media gateway (owner, 2026-10-01: a security issue).** It stays a platform (LLM)
- * provider — that wiring is untouched — but it renders nothing: `MEDIA_PROVIDER=Comet` is refused by
- * name, and a Comet LLM deploy with no override renders on KIE. Task records it stamped before the
- * removal are failed and refunded on their next poll, never sent to it (`media/provider.ts`).
+ * Gateways that USED to render media. Comet was removed from media on 2026-10-01 (a security issue) and
+ * from the platform entirely on 2026-10-03 (`_specs/anthropic-only_plan.md` D5). It survives ONLY here, so
+ * `MEDIA_PROVIDER=Comet` is refused by name and a task record it stamped before the removal is failed and
+ * REFUNDED on its next poll without contacting anyone (`media/provider.ts`) — dropping it would strand a debit.
  */
 export const RETIRED_MEDIA_PROVIDERS = ['Comet'] as const;
 export type RetiredMediaProviderName = (typeof RETIRED_MEDIA_PROVIDERS)[number];
@@ -76,7 +74,8 @@ export type RetiredMediaProviderName = (typeof RETIRED_MEDIA_PROVIDERS)[number];
  * Media gateways that are NOT platform (LLM) providers. `MEDIA_PROVIDER=FAL` is the only way to select
  * one — `getMediaProvider`'s fallback to the LLM provider can never land on it, by construction.
  */
-export const MEDIA_ONLY_PROVIDERS = ['FAL'] as const;
+/* KIE joined 2026-10-03: it is no longer an LLM provider (`_specs/anthropic-only_plan.md` D3). */
+export const MEDIA_ONLY_PROVIDERS = ['KIE', 'FAL'] as const;
 export type MediaProviderName = (typeof MEDIA_PROVIDERS)[number];
 
 /**
@@ -113,7 +112,7 @@ export type MediaProviderName = (typeof MEDIA_PROVIDERS)[number];
  * platformer creation. Chosen knowingly on 2026-07-17 as a `for now`; the §4.2a liveness heartbeat
  * carries the UX until KIE fixes their adapter.
  */
-export const DEFAULT_PLATFORM_PROVIDER: PlatformProviderName = 'KIE';
+export const DEFAULT_PLATFORM_PROVIDER: PlatformProviderName = 'Anthropic';
 
 export interface PlatformConfig {
   /** Who the platform buys tokens from. Never a user choice (§4.2a) — an operator config. */
@@ -121,12 +120,6 @@ export interface PlatformConfig {
 
   /** The platform Anthropic key. Server-only, always. */
   anthropicApiKey?: string;
-
-  /** The platform KIE key. Server-only, always. Used only when `provider === 'KIE'`. */
-  kieApiKey?: string;
-
-  /** The platform Comet key. Server-only, always. Used only when `provider === 'Comet'`. */
-  cometApiKey?: string;
 
   /**
    * The ONE switch that reveals Pro/BYOK UI — provider picker, model selector, key entry (§4.6.1).
@@ -187,8 +180,6 @@ export const PLATFORM_MODEL = DEFAULT_MODEL;
  */
 export const PLATFORM_MODEL_BY_PROVIDER: Record<PlatformProviderName, string> = {
   Anthropic: DEFAULT_MODEL,
-  KIE: DEFAULT_MODEL,
-  Comet: DEFAULT_MODEL,
 };
 
 /**
@@ -213,16 +204,11 @@ export const PLATFORM_MODEL_BY_PROVIDER: Record<PlatformProviderName, string> = 
  * How an operator makes an unpriced model billable, per provider.
  *
  * A RECORD, not a ternary. This was `provider === 'KIE' ? <marketplace> : <rates.ts>` in two places,
- * which is correct for exactly two providers and silently wrong for the third: a Comet operator
- * would have been told to edit `MODEL_RATES` in the source — a code change and a redeploy — for a
- * model whose price actually lives in a promotable list they could fix from the Admin panel in a
- * minute. Wrong advice in an error message is worse than none; it sends someone to change the wrong
- * file and the symptom does not move.
+ * which was correct for exactly two providers and silently wrong for any other. Wrong advice in an error
+ * message is worse than none; it sends someone to change the wrong file and the symptom does not move.
  */
 const UNPRICED_MODEL_FIX: Record<PlatformProviderName, string> = {
   Anthropic: 'Add its row to the Anthropic price list (Settings → Admin → Marketplace prices) and promote.',
-  KIE: 'Add its row to the KIE Marketplace price list (Settings → Admin → Marketplace prices) and promote.',
-  Comet: 'Add its row to the Comet Marketplace price list (Settings → Admin → Marketplace prices) and promote.',
 };
 
 export function getPlatformModel(context?: unknown, providerOverride?: PlatformProviderName): string {
@@ -257,23 +243,10 @@ export function getPlatformModel(context?: unknown, providerOverride?: PlatformP
 export const ENHANCER_MODEL_ENV_KEY = 'ENHANCE_PROMPT_MODEL';
 
 /**
- * The PER-GATEWAY enhancer selector — `KIE_ENHANCE_PROMPT_MODEL`, `COMET_ENHANCE_PROMPT_MODEL`,
- * `ANTHROPIC_ENHANCE_PROMPT_MODEL` (owner, 2026-08-11).
- *
- * 🔴 **It exists because ONE MODEL HAS DIFFERENT IDS ON DIFFERENT GATEWAYS, and the wrong one is a
- * hard failure rather than a fallback.** Haiku 4.5 is `claude-haiku-4-5` on KIE and Anthropic, and
- * ONLY `claude-haiku-4-5-20251001` on Comet — the bare id there is a 400 ("has not been priced by the
- * administrator yet"), and the dated id carries `code: "claude-haiku-4-5"`, which is exactly the
- * id/code drift that makes this look like one model when it is two strings.
- *
- * A single `ENHANCE_PROMPT_MODEL` therefore cannot be correct on more than one gateway at a time, and
- * the moment `AUTO_MODEL_SELECT` can move the gateway per request, "correct today" stops being a
- * property an operator can rely on. The symptom is immediate and total: `getEnhancerModel` refuses an
- * unpriced model, so a deploy that switched gateways got a 503 on the FIRST press of the enhance
- * button — which is how this was found.
- *
- * Named by a function rather than three constants so a fourth provider cannot ship with a silently
- * unreadable variable: `PLATFORM_PROVIDERS` is the only list, and the key is derived from it.
+ * The PER-GATEWAY enhancer selector — `ANTHROPIC_ENHANCE_PROMPT_MODEL` (owner, 2026-08-11). It outranks the
+ * cross-provider `ENHANCE_PROMPT_MODEL`. It existed because one model can carry different ids on different
+ * gateways; Anthropic is the only LLM gateway since 2026-10-03, so it is now simply the more specific of
+ * the two names. Derived from `PLATFORM_PROVIDERS` so the key cannot drift from the list.
  */
 export function enhancerModelEnvKeyFor(provider: PlatformProviderName): string {
   return `${provider.toUpperCase()}_${ENHANCER_MODEL_ENV_KEY}`;
@@ -289,7 +262,7 @@ export function enhancerModelEnvKeyFor(provider: PlatformProviderName): string {
  * nonetheless running on whatever model builds the games, because the enhancer had exactly one
  * question to answer — "which model?" — and exactly one answer available. The rates make the size of
  * that available saving precise: on Anthropic, `claude-sonnet-5` is **3x** `claude-haiku-4-5` on BOTH
- * input ($3 vs $1) and output ($15 vs $5); on Comet it is exactly 2x ($1.60/$8.00 vs $0.80/$4.00).
+ * input ($3 vs $1) and output ($15 vs $5).
  *
  * ⚠️ **The SHIPPED DEFAULT is `claude-sonnet-5` — the knob exists, and the owner has deliberately not
  * spent it (2026-08-11).** This paragraph argued the cheap-model case as though it described what we
@@ -469,49 +442,11 @@ export function getPremiumModel(context?: unknown): string {
 }
 
 /**
- * The provider's default model when `LLM_MODEL` is unset.
- *
- * ⚠️ **`LLM_MODEL` and `KIE_DEFAULT_MODEL` are not rivals, and the precedence is the point.**
- * `KIE_DEFAULT_MODEL` is a SELECTOR validated against the Marketplace price list (`kieDefaultModel` —
- * since 2026-07-18 the price side lives in the admin-promoted list, not in env vars). `LLM_MODEL`
- * picks a model across whichever provider is configured. So: `LLM_MODEL` > `KIE_DEFAULT_MODEL` >
- * baked default.
- *
- * That ordering is safe ONLY because the check above prices whatever wins. Setting `LLM_MODEL=x` while
- * `KIE_DEFAULT_MODEL=y` does NOT price `x` at `y`'s rates — `x` needs its own row or it is refused,
- * which is exactly what stops the two vars from quietly meaning "the model" and "the price of a
- * different model".
+ * The provider's default model when `LLM_MODEL` is unset — Anthropic's (`DEFAULT_MODEL`). `KIE_DEFAULT_MODEL`
+ * stopped mattering when KIE stopped being an LLM provider (2026-10-03, `_specs/anthropic-only_plan.md`).
  */
-function defaultModelFor(provider: PlatformProviderName, context?: unknown): string {
-  switch (provider) {
-    case 'KIE': {
-      const selected = kieDefaultModel(context);
-
-      return selected || PLATFORM_MODEL_BY_PROVIDER.KIE;
-    }
-
-    /*
-     * ⚠️ **Comet has NO second selector, deliberately — `LLM_MODEL` is its only knob.**
-     *
-     * `KIE_DEFAULT_MODEL` above exists for historical reasons and costs a precedence rule that two
-     * separate readers (`kieEnvModel` and this function) must agree on; they once did not, and a
-     * model set via `LLM_MODEL` never reached the provider's model list while settlement charged it
-     * anyway. One variable has no precedence to get wrong. `comet-wire.ts`'s `cometEnvModel` reads
-     * `LLM_MODEL` and nothing else, which is what keeps these two readers in agreement BY
-     * CONSTRUCTION rather than by a rule someone has to remember.
-     */
-    case 'Anthropic':
-    case 'Comet':
-      return PLATFORM_MODEL_BY_PROVIDER[provider];
-
-    default: {
-      /* An exhaustive switch, so a fourth provider is a compile error rather than a silent default. */
-      const exhaustive: never = provider;
-      void exhaustive;
-
-      return DEFAULT_MODEL;
-    }
-  }
+function defaultModelFor(provider: PlatformProviderName): string {
+  return PLATFORM_MODEL_BY_PROVIDER[provider];
 }
 
 /**
@@ -525,22 +460,35 @@ function defaultModelFor(provider: PlatformProviderName, context?: unknown): str
  * billing users at rates for a provider we are not using (§1.3 principle 0).
  */
 export function getPlatformProvider(context?: unknown): PlatformProviderName {
-  const raw = env(context, 'LLM_PROVIDER')?.trim();
+  warnIgnoredProvider(context, 'LLM_PROVIDER', env(context, 'LLM_PROVIDER'));
 
-  if (!raw) {
-    return DEFAULT_PLATFORM_PROVIDER;
+  return DEFAULT_PLATFORM_PROVIDER;
+}
+
+/** Ignored provider settings already warned about — one warning per variable+value per process. */
+const warnedProviderSettings = new Set<string>();
+
+/**
+ * `LLM_PROVIDER` / `LLM_PROVIDER_CHAIN` naming anything but Anthropic (`_specs/anthropic-only_plan.md` D3):
+ * IGNORED, with a warning once per process. Never a throw — `/api/me` and the health check read the config
+ * and must not fall over on a stale env line, and ignoring it lands on the only provider there is.
+ */
+function warnIgnoredProvider(context: unknown, key: string, raw: string | undefined): void {
+  const value = raw?.trim();
+
+  if (!value || value.split(',').every((piece) => !piece.trim() || piece.trim().toLowerCase() === 'anthropic')) {
+    return;
   }
 
-  const match = PLATFORM_PROVIDERS.find((name) => name.toLowerCase() === raw.toLowerCase());
+  const tag = `${key}=${value}`;
 
-  if (!match) {
-    throw new NotConfiguredError(
-      `LLM_PROVIDER="${raw}"`,
-      `Not a platform provider. Supported: ${PLATFORM_PROVIDERS.join(', ')}.`,
+  if (!warnedProviderSettings.has(tag)) {
+    warnedProviderSettings.add(tag);
+    logger.warn(
+      `${key}="${value}" is ignored: Anthropic Managed Agents is the only LLM path (KIE and fal are media ` +
+        'providers only). Remove the variable.',
     );
   }
-
-  return match;
 }
 
 /**
@@ -552,7 +500,7 @@ export function getPlatformProvider(context?: unknown): PlatformProviderName {
  * model bills through `ratesFor`'s most-expensive fallback.
  */
 function platformModelFor(provider: PlatformProviderName, context?: unknown): string {
-  return env(context, 'LLM_MODEL')?.trim() || defaultModelFor(provider, context);
+  return env(context, 'LLM_MODEL')?.trim() || defaultModelFor(provider);
 }
 
 /** The flag that turns the ladder on. OFF by default — see `provider-select.ts` for why. */
@@ -568,7 +516,7 @@ export const LLM_PROVIDER_CHAIN_ENV_KEY = 'LLM_PROVIDER_CHAIN';
  * user's pack buys. Anthropic is last because it is the only rung that is never a discount, and it is
  * PRESENT because "every gateway is down" must degrade to an expensive turn, not to no product.
  */
-export const DEFAULT_PROVIDER_CHAIN: PlatformProviderName[] = ['KIE', 'Comet', 'Anthropic'];
+export const DEFAULT_PROVIDER_CHAIN: PlatformProviderName[] = ['Anthropic'];
 
 /**
  * `LLM_PROVIDER_CHAIN`, validated — same posture as `LLM_PROVIDER`.
@@ -580,36 +528,9 @@ export const DEFAULT_PROVIDER_CHAIN: PlatformProviderName[] = ['KIE', 'Comet', '
  * collapsed to first-seen, so a chain cannot make one rung eligible twice.
  */
 export function getProviderChain(context?: unknown): PlatformProviderName[] {
-  const raw = env(context, LLM_PROVIDER_CHAIN_ENV_KEY)?.trim();
+  warnIgnoredProvider(context, LLM_PROVIDER_CHAIN_ENV_KEY, env(context, LLM_PROVIDER_CHAIN_ENV_KEY));
 
-  if (!raw) {
-    return DEFAULT_PROVIDER_CHAIN;
-  }
-
-  const seen: PlatformProviderName[] = [];
-
-  for (const piece of raw.split(',')) {
-    const name = piece.trim();
-
-    if (!name) {
-      continue;
-    }
-
-    const match = PLATFORM_PROVIDERS.find((p) => p.toLowerCase() === name.toLowerCase());
-
-    if (!match) {
-      throw new NotConfiguredError(
-        `${LLM_PROVIDER_CHAIN_ENV_KEY} contains "${name}"`,
-        `Not a platform provider. Supported: ${PLATFORM_PROVIDERS.join(', ')}.`,
-      );
-    }
-
-    if (!seen.includes(match)) {
-      seen.push(match);
-    }
-  }
-
-  return seen.length > 0 ? seen : DEFAULT_PROVIDER_CHAIN;
+  return DEFAULT_PROVIDER_CHAIN;
 }
 
 /**
@@ -680,7 +601,7 @@ export function resolvePlatformProvider(
     /*
      * 🔴 `alsoRuns` — the requested paid rung's model (2026-09-29). The chain used to be gated on the
      * STANDARD model only, which was safe while every rung had to be priced by KIE. A rung may now name
-     * a model only some gateways sell (Fable 5.1: Comet + Anthropic, not KIE), so a Platinum turn must
+     * a model only some gateways sell (Fable 5.1: not KIE), so a Platinum turn must
      * go to a gateway that sells it NATIVELY — `providerRates` gap-fills every rung into every table
      * and would say yes for all of them. If nothing in the chain sells it, fall back to the standard
      * gate: the tier decision then resolves down or refuses loudly, exactly as before.
@@ -750,8 +671,6 @@ export function getPlatformConfig(context?: unknown, requestedTier?: string): Pl
   return {
     provider: resolvePlatformProvider(context, Date.now(), requestedTierModel(context, requestedTier)),
     anthropicApiKey: env(context, 'ANTHROPIC_API_KEY'),
-    kieApiKey: env(context, 'KIE_API_KEY'),
-    cometApiKey: env(context, 'COMET_API_KEY'),
     proFeaturesEnabled: envFlag(context, 'PRO_FEATURES_ENABLED'),
     githubToken: env(context, 'GITHUB_API_KEY') || env(context, 'VITE_GITHUB_ACCESS_TOKEN'),
     adminToken: env(context, 'ADMIN_TOKEN'),
@@ -813,18 +732,13 @@ export function platformKeyEnvFor(provider: PlatformProviderName): string {
 /** Which env var holds each provider's platform key. The single source for "which key do I need". */
 const PLATFORM_KEY_ENV: Record<PlatformProviderName, string> = {
   Anthropic: 'ANTHROPIC_API_KEY',
-  KIE: 'KIE_API_KEY',
-  Comet: 'COMET_API_KEY',
 };
 
 /**
  * The configured provider's key, or undefined. Server-only — callers ACT on it, never emit it (§5).
  *
- * 🔴 A RECORD, not `provider === 'KIE' ? kie : anthropic`. That ternary was correct for exactly two
- * providers and silently wrong for the third: a Comet deploy would have resolved the ANTHROPIC key
- * — so a box with both keys set would have spent the Anthropic one at ~2.3x the price the operator
- * chose, and a box with only `COMET_API_KEY` would have reported "the platform LLM key for Comet
- * is not configured" while holding it. Neither throws anything a reader could trace back to here.
+ * 🔴 A RECORD, not `provider === 'KIE' ? kie : anthropic` — a ternary is correct for exactly two providers
+ * and silently resolves the wrong key for any other.
  *
  * `PLATFORM_KEY_ENV` already had to be exhaustive; this is the same fact and now has the same shape,
  * so the two cannot disagree about which key a provider needs.
@@ -832,8 +746,6 @@ const PLATFORM_KEY_ENV: Record<PlatformProviderName, string> = {
 function platformKeyFor(config: PlatformConfig): string | undefined {
   const keys: Record<PlatformProviderName, string | undefined> = {
     Anthropic: config.anthropicApiKey,
-    KIE: config.kieApiKey,
-    Comet: config.cometApiKey,
   };
 
   return keys[config.provider];
@@ -880,8 +792,7 @@ export function mediaKeyEnvFor(provider: MediaProviderName): string {
  * this), and "should media move in the same cutover?" becomes a config answer instead of a
  * code change.
  *
- * When the LLM provider is NOT a media gateway (Anthropic, which sells no renders; Comet, which is no
- * longer trusted with media) the fallback is KIE, the incumbent media gateway. It still needs
+ * Unset, media is KIE: the LLM provider (Anthropic, the only one since 2026-10-03) sells no renders. It still needs
  * `KIE_API_KEY` — without it `getMediaConfig` is `null`, which callers report as "not configured" (a
  * describable state the Media panel and the agent tool gate on), never as a silent no-op.
  *
@@ -915,9 +826,8 @@ export function getMediaProvider(context?: unknown): MediaProviderName | null {
     return match;
   }
 
-  const platform = getPlatformProvider(context);
-
-  return MEDIA_PROVIDERS.find((name) => name === platform) ?? 'KIE';
+  /* Unset: KIE — the LLM provider (Anthropic) sells no renders, so media never follows it (D6). */
+  return 'KIE';
 }
 
 /** A media gateway's platform key, whichever gateway is asked for — never only the configured one. */
@@ -966,7 +876,7 @@ export function mediaBaseUrlFor(provider: MediaProviderName, context?: unknown):
 }
 
 /**
- * A RECORD, not the `=== 'Comet'` ternary it replaced: a new gateway must state its answer here or
+ * A RECORD, not a ternary: a new gateway must state its answer here or
  * fail to compile. **FAL: none** — fal has one public queue host (`queue.fal.run`), and its client
  * refuses any task id outside it, so an override would have nowhere safe to point.
  */

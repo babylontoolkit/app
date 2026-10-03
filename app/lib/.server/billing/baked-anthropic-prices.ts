@@ -5,7 +5,7 @@
  * 🔴 **Adding a model must never need a code change.** Until 2026-09-29 this table lived in `rates.ts`
  * and was the ONLY source of Anthropic prices, so pointing `LLM_MODEL` / `PREMIUM_MODEL` /
  * `PLATINUM_MODEL` at a newly released model on Anthropic meant editing source and redeploying —
- * while the very same model on KIE or Comet was one row in Settings → Admin → Marketplace prices.
+ * while the very same model on a gateway was one row in Settings → Admin → Marketplace prices.
  * Owner: *"what happens when i deploy app and six month later i wanna use the new model… do i have do
  * thru all this"*. Now Anthropic has a promotable list exactly like the gateways
  * (`market-price-store.ts`), and this file is its BAKED fallback, the same role
@@ -51,7 +51,7 @@ import type { ModelRates } from './rates';
  * (`creditsForUsage`), so an OVERSTATED cost in this table is billed straight through to the customer:
  * every Anthropic-served Sonnet 5 turn charged 1.5x the credits it should have. It also fed
  * `savings.ts`, whose reference table IS this one — so the "you saved N" figure shown next to a money
- * number claimed a ~47% discount on Comet where the honest number is 20%.
+ * number claimed a ~47% discount on a (since removed) gateway where the honest number was 20%.
  *
  * ⚠️ **The generalisable rule: a rate held deliberately off a vendor's current price is a DATED
  * decision that needs an expiry review, not a comment.** Three documents plus a spec assertion all

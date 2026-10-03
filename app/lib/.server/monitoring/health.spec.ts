@@ -229,66 +229,33 @@ describe('buildHealthReport', () => {
    * using .env files"). The platform key must resolve to KIE's, not Anthropic's, or a correctly
    * configured default deploy reports degraded forever and §9a's `ready` never goes green.
    */
-  it('defaults to KIE, so KIE_API_KEY alone is a healthy platform key', async () => {
-    process.env.KIE_API_KEY = 'kie-test';
-
-    expect((await buildHealthReport(undefined)).dependencies.platformKey).toBe('ok');
-  });
-
   /*
-   * `platformKey` must report on the key the CONFIGURED provider actually needs.
-   *
-   * It asked about `anthropicApiKey` unconditionally, so a KIE deploy missing its KIE key reported
-   * healthy AND ready while 503ing every generation — and §9a keys on `ready` to confirm a credential
-   * pass, so the one check built to catch this would have waved it through. Both directions are pinned:
-   * a wrong-key-present must not read as ok, and the right key alone must be enough.
+   * `platformKey` reports on the key the platform actually spends — ANTHROPIC_API_KEY, the only LLM key
+   * since 2026-10-03 (`_specs/anthropic-only_plan.md`). Both directions are pinned: a KIE key (now a
+   * MEDIA key) must not read as a healthy LLM key, and a stale `LLM_PROVIDER=KIE` cannot make it one.
    */
-  describe('platformKey follows the configured provider', () => {
-    it('is degraded on KIE when only the Anthropic key is set', async () => {
-      process.env.LLM_PROVIDER = 'KIE';
+  describe('platformKey is the Anthropic key — the only LLM key', () => {
+    it('is ok with ANTHROPIC_API_KEY alone', async () => {
       process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
-
-      expect((await buildHealthReport(undefined)).dependencies.platformKey).toBe('degraded');
-    });
-
-    it('is ok on KIE with only the KIE key set — an Anthropic key is not required', async () => {
-      process.env.LLM_PROVIDER = 'KIE';
-      process.env.KIE_API_KEY = 'kie-test';
 
       expect((await buildHealthReport(undefined)).dependencies.platformKey).toBe('ok');
     });
 
-    it('is degraded on Anthropic when only the KIE key is set', async () => {
-      process.env.LLM_PROVIDER = 'Anthropic';
+    it('is degraded with only the KIE key set (KIE is a media key now)', async () => {
       process.env.KIE_API_KEY = 'kie-test';
 
       expect((await buildHealthReport(undefined)).dependencies.platformKey).toBe('degraded');
     });
 
-    /*
-     * With `AUTO_MODEL_SELECT` on, "the configured provider" is not the one that will serve the turn
-     * (SPEC §4.2a). The ladder picks a gateway per request from `LLM_PROVIDER_CHAIN`, so the health
-     * report has to ask about the key of the gateway that will actually be SELECTED — reporting on
-     * `LLM_PROVIDER`'s key there is the same mistake the block above fixed, one layer up: a deploy
-     * that laddered to a working gateway would report degraded forever and drag §9a's `ready` with
-     * it, while a deploy whose configured gateway is keyed but unreachable-by-ladder reads healthy.
-     *
-     * These come in a PAIR on purpose. The first alone passes for a report that simply never
-     * consults `LLM_PROVIDER` at all; the second is what proves the ladder is the reason.
-     */
-    it('follows the SELECTED gateway when AUTO_MODEL_SELECT ladders past the configured one', async () => {
+    it('a stale LLM_PROVIDER=KIE (or the ladder) cannot make the KIE key count', async () => {
+      process.env.LLM_PROVIDER = 'KIE';
       process.env.AUTO_MODEL_SELECT = 'true';
-      process.env.LLM_PROVIDER = 'KIE';
-      process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
-
-      expect((await buildHealthReport(undefined)).dependencies.platformKey).toBe('ok');
-    });
-
-    it('CONTROL — the same env with the ladder OFF still reports on the configured gateway', async () => {
-      process.env.LLM_PROVIDER = 'KIE';
-      process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+      process.env.KIE_API_KEY = 'kie-test';
 
       expect((await buildHealthReport(undefined)).dependencies.platformKey).toBe('degraded');
+
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+      expect((await buildHealthReport(undefined)).dependencies.platformKey).toBe('ok');
     });
   });
 
@@ -326,8 +293,7 @@ describe('buildHealthReport', () => {
 
     /** Everything except the sandbox, so `ready` turns purely on the dependency under test. */
     const wireEverythingElse = () => {
-      process.env.LLM_PROVIDER = 'KIE';
-      process.env.KIE_API_KEY = 'kie-test';
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
       process.env.SUPABASE_URL = 'https://db.example.com';
       process.env.SUPABASE_ANON_KEY = 'anon-test';
       process.env.SUPABASE_SERVICE_ROLE_KEY = 'service-test';

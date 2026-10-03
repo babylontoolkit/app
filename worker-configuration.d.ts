@@ -62,7 +62,10 @@ interface Env {
   STRIPE_PUBLISHABLE_KEY: string;
   STRIPE_WEBHOOK_SECRET: string;
 
-  /** The provider the platform actually buys tokens from, and the model selectors (SPEC §4.2a). */
+  /**
+   * KIE — a MEDIA provider (renders + its price list). Anthropic Managed Agents is the only LLM path since
+   * 2026-10-03; `LLM_PROVIDER` is read only to warn that a non-Anthropic value is ignored.
+   */
   KIE_API_KEY: string;
   KIE_CREDITS_PER_USD: string;
   KIE_DEFAULT_MODEL: string;
@@ -70,9 +73,8 @@ interface Env {
   LLM_MODEL: string;
 
   /**
-   * Who serves image/video renders (SPEC §4.16) — KIE or Comet, its OWN switch. Unset, media follows
-   * `LLM_PROVIDER`; `Anthropic` yields no media provider at all (they sell no renders). It selects a
-   * gateway, never a key: the provider's existing `*_API_KEY` above is what pays.
+   * Who serves image/video/sound renders (SPEC §4.16) — `KIE` or `FAL`. Unset = KIE. It selects a
+   * gateway, never a key: the gateway's own `*_API_KEY` is what pays.
    */
   MEDIA_PROVIDER: string;
 
@@ -164,7 +166,6 @@ interface Env {
 
   /** Agent engine + turn budgets (SPEC §4.2, §8l). */
   AGENT_ENGINE: string;
-  AGENT_ENGINE_EVAL_OVERRIDE: string;
   AGENT_TOOL_LOOP: string;
   AGENT_CLAIM_TTL_MINUTES: string;
   AGENT_MAX_FILE_READS: string;
@@ -194,15 +195,9 @@ interface Env {
   CREATION_FLAT_CREDITS: string;
   GRANTS_ENABLED: string;
 
-  /** Provider + media gateways (SPEC §4.2a, §4.16). */
-  COMET_API_KEY: string;
+  /** Media gateways (SPEC §4.16). */
   FAL_API_KEY: string;
   MEDIA_CALLBACK_URL: string;
-
-  /** Prompt cache warmer (spec/context-budget.md). */
-  CACHE_WARMER_ENABLED: string;
-  CACHE_WARMER_FANOUT: string;
-  CACHE_WARMER_INTERVAL_MINUTES: string;
 
   /** Skills, git import, sharing, sandbox cost model. */
   SKILLS_EXCLUDE: string;
@@ -226,10 +221,8 @@ interface Env {
   LLM_PROVIDER_CHAIN: string;
   ENHANCE_PROMPT_MODEL: string;
   KIE_ENHANCE_PROMPT_MODEL: string;
-  COMET_ENHANCE_PROMPT_MODEL: string;
   ANTHROPIC_ENHANCE_PROMPT_MODEL: string;
   KIE_BASE_URL: string;
-  COMET_BASE_URL: string;
   ZAI_BASE_URL: string;
 
   /** Git OAuth (SPEC §4.13) — read as `${prefix}_OAUTH_CLIENT_ID|SECRET`; without these, Link to GitHub/GitLab is "not configured" in production. */

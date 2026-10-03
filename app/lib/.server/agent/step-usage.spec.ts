@@ -8,7 +8,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { accumulateStepUsage, emptyUsage, type UsageStep } from './step-usage';
-import { BAKED_COMET_PRICES } from '~/lib/.server/billing/baked-comet-prices';
+import { BAKED_MARKET_PRICES } from '~/lib/.server/billing/baked-market-prices';
 import { costForRates, llmRatesFromList, KIE_MODEL_RATES } from '~/lib/.server/billing/rates';
 
 /** One round of a tool loop, shaped like the provider actually reports it. */
@@ -361,7 +361,10 @@ describe('accumulateStepUsage — cached tokens are never billed twice', () => {
    * un-subtracted cached token was billed at the full input rate TWICE OVER — no discount absorbing
    * any part of it.
    *
-   * Priced on Comet's real `grok-4.5` row (input 1.6, output 4.8; read = input under `none`).
+   * Priced on a `grok-4.5` row at Comet's last baked rate (input 1.6, output 4.8; read = input under
+   * `none`). Comet's list was deleted 2026-10-03 (`_specs/anthropic-only_plan.md`), so the row is stated
+   * here and run through the REAL `llmRatesFromList` — the `none` profile is the property under test,
+   * not which gateway quoted it.
    */
   it('subtracts on the chat family, where a double-bill is charged at 2x full input', () => {
     const totals = accumulateStepUsage(
@@ -378,7 +381,10 @@ describe('accumulateStepUsage — cached tokens are never billed twice', () => {
     expect(totals.promptTokens).toBe(2_000);
     expect(totals.cacheReadTokens).toBe(8_000);
 
-    const rates = llmRatesFromList(BAKED_COMET_PRICES)['grok-4.5'];
+    const rates = llmRatesFromList({
+      ...BAKED_MARKET_PRICES,
+      llm: { 'grok-4.5': { inputPerMTok: 1.6, outputPerMTok: 4.8 } },
+    })['grok-4.5'];
     expect(rates.inputPerMTok).toBe(1.6);
     expect(rates.cacheReadPerMTok).toBe(1.6); // `none` — no discount we cannot verify.
 

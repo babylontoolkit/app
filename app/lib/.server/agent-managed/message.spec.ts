@@ -11,7 +11,15 @@ import type { Message } from 'ai';
 import { describe, expect, it } from 'vitest';
 import { MANAGED_BUILD_OPEN, phaseById } from '~/lib/agent/creation-plan';
 import type { FileMap } from '~/lib/.server/llm/constants';
-import { buildManagedUserMessage, conversationRecap, RECAP_MAX_CHARS } from './message';
+import { PLAN_MODE } from '~/types/message-marks';
+import {
+  buildManagedUserMessage,
+  conversationRecap,
+  managedPlanNote,
+  mcpToolsNote,
+  PLAN_MODE_ENDED_NOTE,
+  RECAP_MAX_CHARS,
+} from './message';
 
 const SECRET_BODY = 'const KART_SECRET_BODY_7731 = "never sent";';
 
@@ -138,5 +146,65 @@ describe('a managed FIRST BUILD carries every phase as guidance (T9)', () => {
     );
 
     expect(repair).not.toContain(MANAGED_BUILD_OPEN);
+  });
+});
+
+describe('Plan mode and MCP notes (managed-only plan D2, D6)', () => {
+  const ask = (content: string): Message => ({ id: `u-${content}`, role: 'user', content });
+
+  it('a Plan turn is prefixed with the Plan note, before the words, and runs no build phases', () => {
+    const text = textOf(
+      buildManagedUserMessage({
+        messages: [ask('how should drifting work?')],
+        newSession: false,
+        planMode: true,
+        buildPhases: ['design', 'game', 'frontend'],
+      }),
+    );
+
+    expect(text.startsWith(managedPlanNote())).toBe(true);
+    expect(text.endsWith('how should drifting work?')).toBe(true);
+    expect(text).toContain('_specs/');
+    expect(text).not.toContain(MANAGED_BUILD_OPEN);
+  });
+
+  it('the first Build turn after a Plan turn says Plan mode has ended; a later one does not', () => {
+    const afterPlan: Message[] = [
+      ask('plan it'),
+      { id: 'a1', role: 'assistant', content: 'Here is the plan', annotations: [PLAN_MODE, 'no-replay'] } as Message,
+      ask('build it now'),
+    ];
+    const afterBuild: Message[] = [
+      ask('plan it'),
+      { id: 'a1', role: 'assistant', content: 'done', annotations: [] } as Message,
+      ask('tweak it'),
+    ];
+
+    expect(textOf(buildManagedUserMessage({ messages: afterPlan, newSession: false }))).toBe(
+      `${PLAN_MODE_ENDED_NOTE}\n\nbuild it now`,
+    );
+    expect(textOf(buildManagedUserMessage({ messages: afterBuild, newSession: false }))).toBe('tweak it');
+  });
+
+  it('MCP tools are announced in ONE line (servers named), never listed', () => {
+    const tools = [
+      { name: 'search', server: 'docs', description: 'LONG_DESCRIPTION_NEVER_SENT', inputSchema: { type: 'object' } },
+      { name: 'read_file', server: 'fs' },
+    ];
+    const text = textOf(
+      buildManagedUserMessage({ messages: [ask('use the docs')], newSession: false, mcpTools: tools }),
+    );
+
+    expect(text).toBe(`${mcpToolsNote(tools)}\n\nuse the docs`);
+    expect(text).toContain('2 MCP tool(s)');
+    expect(text).toContain('docs, fs');
+    expect(text).not.toContain('LONG_DESCRIPTION_NEVER_SENT');
+    expect(mcpToolsNote([])).toBe('');
+  });
+
+  it('CONTROL: an ordinary Build turn carries no note at all', () => {
+    expect(textOf(buildManagedUserMessage({ messages: [ask('add a boost pad')], newSession: false }))).toBe(
+      'add a boost pad',
+    );
   });
 });

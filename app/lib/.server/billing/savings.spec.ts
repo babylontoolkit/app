@@ -30,13 +30,28 @@ import {
   costForRates,
   creditsForRawCost,
   getBillingConfig,
-  kieRates,
   providerRates,
   ratesFor,
   type BillingConfig,
   type TokenUsage,
 } from './rates';
-import { invalidateMarketPricesCache } from './market-price-store';
+import { invalidateMarketPricesCache, promoteMarketPrices } from './market-price-store';
+import { BAKED_ANTHROPIC_PRICES } from './baked-anthropic-prices';
+import type { ObjectStore } from '~/lib/.server/storage';
+
+/** An in-memory store, so a promotion in a control below can never reach the developer's real `.data/`. */
+function memoryStore(): ObjectStore {
+  const objects = new Map<string, Uint8Array>();
+
+  return {
+    backend: 'filesystem',
+    put: async (key, bytes) => void objects.set(key, bytes),
+    get: async (key) => objects.get(key) ?? null,
+    delete: async (key) => void objects.delete(key),
+    list: async (prefix) =>
+      [...objects.entries()].filter(([k]) => k.startsWith(prefix)).map(([k, v]) => ({ key: k, size: v.length })),
+  };
+}
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -45,7 +60,7 @@ afterEach(() => {
 
 /**
  * Retired price variables and retired ladder variables, scrubbed only where a CONTROL calls into
- * `providerRates`/`kieRates`/`ratesFor` — which genuinely do refuse them (that refusal is defect 1).
+ * `providerRates`/`ratesFor` — which genuinely do refuse them (that refusal is defect 1).
  *
  * ⚠️ The developer's real `.env.local` sets `ENABLE_EXTENDED_MODELS`, `PREMIUM_MODEL` and friends, and
  * `env()` falls back to `process.env`, so a control that reaches the ladder must state its own world.
@@ -249,52 +264,83 @@ describe('describeSavings is PURE, so a stale env var cannot 503 the credits pan
 });
 
 /**
- * 🔴 DEFECT 2 — `providerRates().Anthropic` IS NOT ANTHROPIC'S OWN TABLE.
+ * 🔴 DEFECT 2 — `providerRates().Anthropic` IS NOT THE REFERENCE.
  *
- * It INJECTS every paid rung's model at MARKETPLACE (KIE-shaped) rates so a rung Anthropic does not
- * sell still settles. Priced through that, a model Anthropic never listed resolves anyway — so the
- * "Anthropic list" a saving is measured against would be a KIE price wearing an Anthropic label, and a
- * gateway would end up compared against its OWN rate: a guaranteed "you saved 0%" on a turn that may
- * have saved plenty. The baked `MODEL_RATES` table is the only thing that means "what Anthropic charges".
+ * `providerRates().Anthropic` is the ACTIVE Anthropic price list (whatever an operator PROMOTED in
+ * Settings → Admin → Marketplace prices) plus the paid-rung gap-fill. Priced through that, a model the
+ * baked table never listed resolves anyway, and a repriced row moves the yardstick — so the "Anthropic
+ * list" a saving is measured against would be an operator's edit wearing Anthropic's label. The baked
+ * `MODEL_RATES` table is the only thing that means "what Anthropic charges".
  *
- * ⚠️ This block used `claude-fable-5` as the never-priced model and described KIE as pricing it "ABOVE
- * Anthropic's Opus row". Both halves were wrong (KIE: $4/$20; Anthropic sells fable-5 itself at $10/$50,
- * `rates.ts` 2026-08-12) and the rule is right anyway — the subject moved to a `gpt-*` id, which no
- * Anthropic table can ever carry.
+ * ⚠️ Until 2026-10-03 the control here was a `PREMIUM_MODEL=gpt-5-6-sol` rung gap-filled from KIE's
+ * list. KIE and Comet price no LLM turn any more (`_specs/anthropic-only_plan.md`), so a rung is priced
+ * from Anthropic's list alone and that injection cannot fire for a model Anthropic does not price. The
+ * divergence that is still expressible is a PROMOTED Anthropic list, so the controls promote one.
  */
-describe('describeSavings measures against the BAKED table, never the injected one', () => {
-  it('is null for a rung model Anthropic never priced — even with PREMIUM_MODEL naming it', () => {
+describe('describeSavings measures against the BAKED table, never the active one', () => {
+  it('is null for a model only a PROMOTED Anthropic list prices', async () => {
     scrubLadderAndPriceEnv();
-    vi.stubEnv('PREMIUM_MODEL', 'gpt-5-6-sol');
 
-    // Anthropic bakes no row for it. That is the whole reason the injection exists.
-    expect(MODEL_RATES['gpt-5-6-sol']).toBeUndefined();
+    const promoted = await promoteMarketPrices(memoryStore(), 'Anthropic', {
+      ...BAKED_ANTHROPIC_PRICES,
+      llm: { ...BAKED_ANTHROPIC_PRICES.llm, 'claude-opus-9': { inputPerMTok: 3, outputPerMTok: 15 } },
+    });
+    expect(promoted.ok).toBe(true);
+
+    // The baked table has no row for it.
+    expect(MODEL_RATES['claude-opus-9']).toBeUndefined();
 
     /*
-     * CONTROL: through the table the first draft used, this model IS priced — and priced at KIE's own
-     * rate, not at anything Anthropic ever charged. A lookup there would have resolved and produced a
-     * confident number.
+     * CONTROL: through the active table, this model IS priced — at the operator's number, not at
+     * anything Anthropic ever published. A lookup there would have resolved and produced a confident
+     * figure.
      */
-    const injected = providerRates().Anthropic['gpt-5-6-sol'];
-    expect(injected).toBeDefined();
-    expect(injected.inputPerMTok).toEqual(kieRates()['gpt-5-6-sol'].inputPerMTok);
+    const active = providerRates().Anthropic['claude-opus-9'];
+    expect(active).toBeDefined();
+    expect(active.inputPerMTok).toBe(3);
 
     expect(
       describeSavings({
         usage: USAGE,
-        model: 'gpt-5-6-sol',
+        model: 'claude-opus-9',
         actualCostUsd: GATEWAY_COST_USD,
         creditsCharged: 100,
       }),
     ).toBeNull();
   });
 
+  it('keeps the baked yardstick when a promoted list REPRICES a baked model', async () => {
+    scrubLadderAndPriceEnv();
+
+    const promoted = await promoteMarketPrices(memoryStore(), 'Anthropic', {
+      ...BAKED_ANTHROPIC_PRICES,
+      llm: { ...BAKED_ANTHROPIC_PRICES.llm, [PRICED_MODEL]: { inputPerMTok: 1.25, outputPerMTok: 6.25 } },
+    });
+    expect(promoted.ok).toBe(true);
+
+    // CONTROL: the active table really moved — a quarter of the baked row.
+    expect(providerRates().Anthropic[PRICED_MODEL].inputPerMTok).toBe(MODEL_RATES[PRICED_MODEL].inputPerMTok / 4);
+
+    /*
+     * Measured against the ACTIVE row, a gateway cost of a quarter of baked list would be "full price"
+     * (no saving). Against the baked table it is the 75% the fixture states.
+     */
+    expect(
+      describeSavings({
+        usage: USAGE,
+        model: PRICED_MODEL,
+        actualCostUsd: GATEWAY_COST_USD,
+        creditsCharged: 100,
+      }),
+    ).toEqual({ basis: 'saved', referenceCredits: 400, savedCredits: 300, percent: 75 });
+  });
+
   /*
-   * The CONTROL for the control: a model Anthropic DOES bake is still compared, with PREMIUM_MODEL set
-   * exactly as above. Without this, "returns null for fable-5" passes just as happily for a module that
+   * The CONTROL for the control: a model Anthropic DOES bake is still compared with no promotion in
+   * play. Without this, "returns null for an unbaked model" passes just as happily for a module that
    * returns null for everything — the cheapest way to make an over-claiming bug go green.
    */
-  it('...and a natively-priced model with the SAME env still reports', () => {
+  it('...and a natively-priced model still reports', () => {
     scrubLadderAndPriceEnv();
     vi.stubEnv('PREMIUM_MODEL', 'claude-fable-5');
 

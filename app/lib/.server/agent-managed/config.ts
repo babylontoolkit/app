@@ -1,10 +1,8 @@
 /**
  * The managed agent engine's configuration (`_specs/managed-agents-engine_plan.md` D9, D10, D7).
  *
- * `AGENT_ENGINE` picks who runs the agent loop: `managed` (Anthropic's hosted Managed Agents loop, this
- * directory — THE DEFAULT since T12) or `legacy` (our own `streamText` tool loop, `proxy.ts`, kept as the
- * kill switch). It is read per DEPLOY and never switched per turn automatically — a session lives on
- * Anthropic's side, so changing engines mid-chat would lose it (D9).
+ * Anthropic's hosted Managed Agents loop (this directory) is the ONLY engine since 2026-10-03
+ * (`_specs/anthropic-only_plan.md`); `AGENT_ENGINE` is ignored (`resolveAgentEngine`).
  *
  * Every value here is config, never a constant in code (CLAUDE.md "rates are config"). An absent
  * Anthropic key is a describable "not configured" state, never a crash (§1.3 principle 0).
@@ -15,28 +13,30 @@ import { DEFAULT_EFFORT, type EffortLevel, parseEffort } from '~/lib/modules/llm
 
 export type AgentEngine = 'managed' | 'legacy';
 
-/** Unrecognised `AGENT_ENGINE` values already warned about — one warning per value per process. */
+/** `AGENT_ENGINE` values already warned about — one warning per value per process. */
 const warnedEngineValues = new Set<string>();
 
 /**
- * The engine a deploy runs. `managed` is the default (plan T12 — the T11 eval had it faster and cheaper on
- * builds with success tied); only the exact value `legacy` (trimmed) selects the kill switch.
+ * The engine a deploy runs — ALWAYS `managed` (owner, 2026-10-03, `_specs/anthropic-only_plan.md` D1:
+ * *"Anthropic Managed Agent SHOULD be the Only LLM_PROVIDER PATH… period"*).
  *
- * Unset, empty and `managed` resolve to `managed` silently. Any OTHER non-empty value also resolves to
- * `managed` but warns ONCE per process: a typo in the kill switch (`legasy`) must not look like it worked,
- * and the warning is the only place that typo can surface — the turn itself runs fine on the default.
+ * `AGENT_ENGINE` is no longer a switch. Until 2026-10-03 the exact value `legacy` selected the built-in
+ * `streamText` loop as a kill switch; that path is gone (nothing routes to `proxy.ts` any more). A set value
+ * other than `managed` — `legacy` included — is IGNORED with a warning once per process: ignoring it lands
+ * on the engine the owner wants, so refusing would only take turns down over a stale env line. The warning
+ * is the only place that stale line can surface.
+ *
+ * The return type keeps `'legacy'` so the session hint's wire shape (`agentEngine`) is unchanged for a
+ * browser holding an older bundle; this function never returns it.
  */
 export function resolveAgentEngine(context: unknown): AgentEngine {
   const raw = env(context, 'AGENT_ENGINE')?.trim();
 
-  if (raw === 'legacy') {
-    return 'legacy';
-  }
-
   if (raw && raw !== 'managed' && !warnedEngineValues.has(raw)) {
     warnedEngineValues.add(raw);
     console.warn(
-      `[agent-engine] AGENT_ENGINE=${JSON.stringify(raw)} is not "managed" or "legacy"; running the managed engine (the default). Set AGENT_ENGINE=legacy to use the built-in agent loop.`,
+      `[agent-engine] AGENT_ENGINE=${JSON.stringify(raw)} is ignored: Anthropic Managed Agents is the only engine ` +
+        '(the legacy loop was removed 2026-10-03). Remove the variable.',
     );
   }
 
@@ -79,7 +79,7 @@ export function getManagedEngineConfig(context: unknown): ManagedEngineConfig {
   if (!apiKey) {
     throw new NotConfiguredError(
       'The managed agent engine (ANTHROPIC_API_KEY)',
-      'Set ANTHROPIC_API_KEY, or set AGENT_ENGINE=legacy to use the built-in agent loop.',
+      'Set ANTHROPIC_API_KEY — Anthropic Managed Agents is the only agent engine.',
     );
   }
 
@@ -117,9 +117,7 @@ export function getManagedClient(context: unknown): Anthropic {
    * A spec must inject a fake; reaching here under vitest is always a bug in the spec.
    */
   if (process.env.VITEST) {
-    throw new Error(
-      'A spec reached the real Managed Agents client — inject a fake with setManagedClientForTests (or pin AGENT_ENGINE=legacy).',
-    );
+    throw new Error('A spec reached the real Managed Agents client — inject a fake with setManagedClientForTests.');
   }
 
   return new Anthropic({ apiKey: getManagedEngineConfig(context).apiKey });

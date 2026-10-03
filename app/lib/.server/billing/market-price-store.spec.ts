@@ -9,12 +9,14 @@
  *
  * ## The provider dimension (2026-08-10, `_specs/cometapi-provider_plan.md` T4)
  *
- * There are now TWO marketplaces (`MARKET_PRICE_PROVIDERS`), each with its own key prefix, its own
- * baked fallback and its own cache slot. Every failure that split introduces is silent in the same
- * specific way, and it is the reason half this file exists: **both lists price `claude-sonnet-5`, at
- * different rates** ($0.85/$4.275 on KIE, $1.60/$8.00 on Comet), so reading the wrong list does not
- * throw, does not return `undefined`, and does not fail a type check — it returns a plausible number
- * and mis-bills every generation by ~2x in whichever direction the mistake points.
+ * There are several marketplaces (`MARKET_PRICE_PROVIDERS` — KIE, Anthropic and FAL since Comet was
+ * removed on 2026-10-03, `_specs/anthropic-only_plan.md`), each with its own key prefix, its own baked
+ * fallback and its own cache slot. Every failure that split introduces is silent in the same specific
+ * way, and it is the reason half this file exists: **KIE's and Anthropic's lists both price
+ * `claude-sonnet-5`, at different rates** ($0.85/$4.275 on KIE, $2/$10 on Anthropic), so reading the
+ * wrong list does not throw, does not return `undefined`, and does not fail a type check — it returns
+ * a plausible number and mis-bills every generation by ~2x in whichever direction the mistake points.
+ * (KIE's `llm` rows price nothing any more, which makes a wrong read onto them MORE dangerous, not less.)
  *
  * ⚠️ **The single most important test in this file is the no-migration one.** KIE's storage keys are
  * byte-identical to what they were before the split, and a deployed store already holds an operator's
@@ -28,7 +30,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ObjectStore } from '~/lib/.server/storage';
 import { setObjectStore } from '~/lib/.server/storage';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
-import { BAKED_COMET_PRICES } from './baked-comet-prices';
+import { BAKED_ANTHROPIC_PRICES } from './baked-anthropic-prices';
 import { BAKED_FAL_PRICES } from './baked-fal-prices';
 import { DEFAULT_MODEL } from '~/utils/constants';
 import {
@@ -308,15 +310,15 @@ describe("KIE's existing storage keys — the no-migration guarantee", () => {
   });
 
   /*
-   * The other half of "keyed, not blanket": Comet must not adopt bytes that belong to KIE. If both
-   * providers read one prefix, the no-migration guarantee above would hold and every Comet
-   * generation would still settle at KIE's rates.
+   * The other half of "keyed, not blanket": Anthropic must not adopt bytes that belong to KIE. If both
+   * providers read one prefix, the no-migration guarantee above would hold and every Anthropic
+   * generation would settle at KIE's rates.
    */
-  it('does not let Comet adopt a KIE-keyed promotion', async () => {
+  it('does not let Anthropic adopt a KIE-keyed promotion', async () => {
     await seedLegacyPromotion(contextStore);
 
-    expect(await ensureMarketPrices('Comet', {})).toBe(BAKED_COMET_PRICES);
-    expect(activeMarketPriceVersionId('Comet')).toBeNull();
+    expect(await ensureMarketPrices('Anthropic', {})).toBe(BAKED_ANTHROPIC_PRICES);
+    expect(activeMarketPriceVersionId('Anthropic')).toBeNull();
   });
 });
 
@@ -328,23 +330,23 @@ describe('the two baked lists are distinct', () => {
    */
   it('serves each provider its OWN baked table', () => {
     expect(activeMarketPrices('KIE')).toBe(BAKED_MARKET_PRICES);
-    expect(activeMarketPrices('Comet')).toBe(BAKED_COMET_PRICES);
+    expect(activeMarketPrices('Anthropic')).toBe(BAKED_ANTHROPIC_PRICES);
   });
 
   it('prices the same model at genuinely different rates, so a wrong read looks like a right answer', () => {
     const kie = activeMarketPrices('KIE').llm['claude-sonnet-5'];
-    const comet = activeMarketPrices('Comet').llm['claude-sonnet-5'];
+    const anthropic = activeMarketPrices('Anthropic').llm['claude-sonnet-5'];
 
     /* Control: both lists really do price it — the difference below is a price, not an absence. */
     expect(kie, 'KIE must price the platform default').toBeDefined();
-    expect(comet, 'Comet must price the platform default').toBeDefined();
+    expect(anthropic, 'Anthropic must price the platform default').toBeDefined();
 
-    expect(comet.inputPerMTok).not.toBe(kie.inputPerMTok);
-    expect(comet.outputPerMTok).not.toBe(kie.outputPerMTok);
+    expect(anthropic.inputPerMTok).not.toBe(kie.inputPerMTok);
+    expect(anthropic.outputPerMTok).not.toBe(kie.outputPerMTok);
 
     /* Pinned absolutely, so "different" cannot be satisfied by either row drifting to anything. */
     expect(kie.inputPerMTok).toBe(0.85);
-    expect(comet.inputPerMTok).toBe(1.6);
+    expect(anthropic.inputPerMTok).toBe(2);
   });
 });
 
@@ -352,13 +354,13 @@ describe('promotion is scoped to ONE provider', () => {
   it('leaves the other provider’s pointer, cache and active list untouched', async () => {
     const store = memoryStore();
 
-    const promoted = await promoteMarketPrices(store, 'Comet', {
-      ...BAKED_COMET_PRICES,
-      llm: { ...BAKED_COMET_PRICES.llm, 'claude-sonnet-5': { inputPerMTok: 9, outputPerMTok: 45 } },
+    const promoted = await promoteMarketPrices(store, 'Anthropic', {
+      ...BAKED_ANTHROPIC_PRICES,
+      llm: { ...BAKED_ANTHROPIC_PRICES.llm, 'claude-sonnet-5': { inputPerMTok: 9, outputPerMTok: 45 } },
     });
 
     expect(promoted.ok).toBe(true);
-    expect(activeMarketPrices('Comet').llm['claude-sonnet-5'].inputPerMTok).toBe(9);
+    expect(activeMarketPrices('Anthropic').llm['claude-sonnet-5'].inputPerMTok).toBe(9);
 
     /* KIE saw none of it: no pointer, no versions, no cache slot, baked list by identity. */
     expect(await readPointer(store, 'KIE')).toBeNull();
@@ -367,68 +369,67 @@ describe('promotion is scoped to ONE provider', () => {
     expect(activeMarketPrices('KIE')).toBe(BAKED_MARKET_PRICES);
   });
 
-  it('is symmetric — a KIE promotion does not move Comet', async () => {
+  it('is symmetric — a KIE promotion does not move Anthropic', async () => {
     const store = memoryStore();
     const promoted = await promoteMarketPrices(store, 'KIE', listWithOpusInput(3));
 
     expect(promoted.ok).toBe(true);
     expect(activeMarketPrices('KIE').llm['claude-opus-4-8'].inputPerMTok).toBe(3);
 
-    expect(await readPointer(store, 'Comet')).toBeNull();
-    expect(activeMarketPriceVersionId('Comet')).toBeNull();
-    expect(activeMarketPrices('Comet')).toBe(BAKED_COMET_PRICES);
+    expect(await readPointer(store, 'Anthropic')).toBeNull();
+    expect(activeMarketPriceVersionId('Anthropic')).toBeNull();
+    expect(activeMarketPrices('Anthropic')).toBe(BAKED_ANTHROPIC_PRICES);
   });
 
   it('writes each provider under its own prefix, and never the other’s', async () => {
     const store = memoryStore();
     await promoteMarketPrices(store, 'KIE', listWithOpusInput(3));
-    await promoteMarketPrices(store, 'Comet', BAKED_COMET_PRICES);
+    await promoteMarketPrices(store, 'Anthropic', BAKED_ANTHROPIC_PRICES);
 
     expect((await store.list('pricing/kie-market/')).length).toBe(2);
-    expect((await store.list('pricing/comet-market/')).length).toBe(2);
+    expect((await store.list('pricing/anthropic-market/')).length).toBe(2);
   });
 
   /*
    * The validate-before-write wall is a property of the STORE, not of KIE. A refusal on the new
    * provider must be just as total: no version object, no pointer, and the baked list still serving.
    */
-  it('writes nothing at all when a Comet promotion is refused', async () => {
+  it('writes nothing at all when an Anthropic promotion is refused', async () => {
     const store = memoryStore();
-    const bad = { ...BAKED_COMET_PRICES, llm: {}, schemaVersion: 9 };
+    const bad = { ...BAKED_ANTHROPIC_PRICES, llm: {}, schemaVersion: 9 };
 
-    const result = await promoteMarketPrices(store, 'Comet', bad);
+    const result = await promoteMarketPrices(store, 'Anthropic', bad);
 
     expect(result.ok).toBe(false);
     expect(result.ok ? [] : result.errors.length).toBeGreaterThanOrEqual(2);
-    expect(await listVersions(store, 'Comet')).toEqual([]);
-    expect(await readPointer(store, 'Comet')).toBeNull();
-    expect(activeMarketPrices('Comet')).toBe(BAKED_COMET_PRICES);
+    expect(await listVersions(store, 'Anthropic')).toEqual([]);
+    expect(await readPointer(store, 'Anthropic')).toBeNull();
+    expect(activeMarketPrices('Anthropic')).toBe(BAKED_ANTHROPIC_PRICES);
   });
 
   it('invalidates one slot or all of them, as asked', async () => {
     const store = memoryStore();
     await promoteMarketPrices(store, 'KIE', listWithOpusInput(3));
-    await promoteMarketPrices(store, 'Comet', {
-      ...BAKED_COMET_PRICES,
-      llm: { ...BAKED_COMET_PRICES.llm, 'claude-sonnet-5': { inputPerMTok: 9, outputPerMTok: 45 } },
+    await promoteMarketPrices(store, 'Anthropic', {
+      ...BAKED_ANTHROPIC_PRICES,
+      llm: { ...BAKED_ANTHROPIC_PRICES.llm, 'claude-sonnet-5': { inputPerMTok: 9, outputPerMTok: 45 } },
     });
 
     invalidateMarketPricesCache('KIE');
     expect(activeMarketPrices('KIE'), 'the named slot is cleared').toBe(BAKED_MARKET_PRICES);
-    expect(activeMarketPrices('Comet').llm['claude-sonnet-5'].inputPerMTok, 'the other survives').toBe(9);
+    expect(activeMarketPrices('Anthropic').llm['claude-sonnet-5'].inputPerMTok, 'the other survives').toBe(9);
 
     invalidateMarketPricesCache();
-    expect(activeMarketPrices('Comet')).toBe(BAKED_COMET_PRICES);
+    expect(activeMarketPrices('Anthropic')).toBe(BAKED_ANTHROPIC_PRICES);
   });
 });
 
 describe('ensureMarketPrices', () => {
   /*
-   * The default exists so that no pre-split caller changed meaning. A default of anything else would
-   * be silent: `web-search-tool.ts` and every legacy one-argument call would start refreshing — and
-   * therefore pricing from — a marketplace they were never written against.
+   * The provider is REQUIRED (it briefly defaulted to KIE). Loading one slot must fill that slot only:
+   * a call that warmed a neighbour as a side effect would hide the day a caller names the wrong list.
    */
-  it('defaults to KIE when no provider is named', async () => {
+  it('loads the named provider’s slot and no other', async () => {
     await contextStore.put(
       'pricing/kie-market/versions/mp_20260718120000.json',
       encode(listWithOpusInput(3)),
@@ -445,8 +446,8 @@ describe('ensureMarketPrices', () => {
     expect(loaded.llm['claude-opus-4-8'].inputPerMTok).toBe(3);
     expect(activeMarketPriceVersionId('KIE')).toBe('mp_20260718120000');
 
-    /* Control: the Comet slot was not filled as a side effect of the defaulted call. */
-    expect(activeMarketPriceVersionId('Comet')).toBeNull();
+    /* Control: the Anthropic slot was not filled as a side effect of the call. */
+    expect(activeMarketPriceVersionId('Anthropic')).toBeNull();
   });
 
   /*
@@ -455,13 +456,13 @@ describe('ensureMarketPrices', () => {
    */
   it('falls back to that provider’s baked list when the pointer names a missing version', async () => {
     await contextStore.put(
-      'pricing/comet-market/active.json',
+      'pricing/anthropic-market/active.json',
       encode({ versionId: 'mp_gone', activatedAt: '2026-08-10T00:00:00.000Z', activatedBy: 'promote' }),
       'application/json',
     );
 
-    expect(await ensureMarketPrices('Comet', {})).toBe(BAKED_COMET_PRICES);
-    expect(activeMarketPriceVersionId('Comet')).toBeNull();
+    expect(await ensureMarketPrices('Anthropic', {})).toBe(BAKED_ANTHROPIC_PRICES);
+    expect(activeMarketPriceVersionId('Anthropic')).toBeNull();
   });
 
   /* A store that throws is an ops alert, never a dead billing path (§4.6). */
@@ -473,37 +474,24 @@ describe('ensureMarketPrices', () => {
       },
     });
 
-    await expect(ensureMarketPrices('Comet', {})).resolves.toBe(BAKED_COMET_PRICES);
+    await expect(ensureMarketPrices('Anthropic', {})).resolves.toBe(BAKED_ANTHROPIC_PRICES);
     await expect(ensureMarketPrices('KIE', {})).resolves.toBe(BAKED_MARKET_PRICES);
   });
 });
 
 describe('marketPriceProvidersFor', () => {
   /*
-   * 🔴 KIE IS ALWAYS IN THE ANSWER, ON EVERY PROVIDER, AND THAT IS NOT TIDINESS.
+   * 🔴 ANTHROPIC ONLY, ON EVERY INPUT (2026-10-03, `_specs/anthropic-only_plan.md` D4).
    *
-   * `getModelTier` (`rates.ts`) prices the §4.6.1a paid rungs — Premium, and any rung added later —
-   * from KIE's marketplace list no matter who is serving the generation. A deploy that refreshed only
-   * "its own" list would therefore price every paid rung from KIE's BAKED table forever: the
-   * operator's promoted rung prices silently ignored, nothing thrown, and the credit total moving in
-   * whichever direction the stale numbers point. These assertions are the wall against someone
-   * "simplifying" this to `[platformProvider]`.
+   * These are the lists an LLM turn is priced from, and `getModelTier` prices the paid rungs from the
+   * same set. KIE used to be in every answer (the rungs were priced from its list), and Comet was an
+   * LLM gateway of its own; both are gone. A KIE list in this answer would let a promoted KIE `llm` row
+   * — which prices nothing by contract — reach the ladder again, silently.
    */
-  it('always includes KIE (media and web-search price from it on every provider)', () => {
-    for (const platform of ['KIE', 'Comet', 'Anthropic', 'not-a-provider', '']) {
-      expect(marketPriceProvidersFor(platform), platform).toContain('KIE');
+  it('answers Anthropic alone, whatever provider is named — including a stale KIE or Comet', () => {
+    for (const platform of ['Anthropic', 'KIE', 'Comet', 'FAL', 'not-a-provider', '']) {
+      expect(marketPriceProvidersFor(platform), platform).toEqual(['Anthropic']);
     }
-  });
-
-  /*
-   * 🔴 ALL lists, own first (2026-09-29). A paid rung is now accepted if ANY list prices its model
-   * (`getModelTier`), so every list must be loaded before the ladder is read — one left on its baked
-   * table is an operator's promoted prices silently ignored.
-   */
-  it('returns the platform’s own list first, then every other list', () => {
-    expect(marketPriceProvidersFor('Comet')).toEqual(['Comet', 'KIE', 'Anthropic']);
-    expect(marketPriceProvidersFor('KIE')).toEqual(['KIE', 'Comet', 'Anthropic']);
-    expect(marketPriceProvidersFor('Anthropic')).toEqual(['Anthropic', 'KIE', 'Comet']);
   });
 
   it('never duplicates a list', () => {
@@ -516,37 +504,45 @@ describe('marketPriceProvidersFor', () => {
   /*
    * The argument is a plain `string` (to keep this module out of the `config -> rates ->
    * market-price-store` import cycle), so an unrecognised value is REACHABLE — a typo'd `LLM_PROVIDER`,
-   * or a stale deploy naming a provider that has since been removed. It must degrade to EVERY list,
+   * or a stale deploy naming a provider that has since been removed. It must degrade to EVERY LLM list,
    * never to an empty one: refreshing nothing means every list serves baked with nothing said about it.
    */
   it('degrades an unknown provider name to every LLM list rather than to nothing', () => {
     expect(marketPriceProvidersFor('Bedrock')).toEqual([...LLM_PRICE_PROVIDERS]);
     expect(marketPriceProvidersFor('')).toEqual([...LLM_PRICE_PROVIDERS]);
-    expect(marketPriceProvidersFor('kie'), 'match is exact, not case-folded').toEqual([...LLM_PRICE_PROVIDERS]);
+    expect(marketPriceProvidersFor('anthropic'), 'match is exact, not case-folded').toEqual([...LLM_PRICE_PROVIDERS]);
+    expect(LLM_PRICE_PROVIDERS.length, 'control: the LLM set is not empty').toBeGreaterThan(0);
   });
 
   /*
-   * 🔴 A media-only list prices no LLM turn, so it never joins the LLM set — not even when it is
-   * named as the platform provider (which no valid config can do, since FAL is not a platform
-   * provider; the name degrades like any unknown one). Its list is loaded at the MEDIA doorways.
+   * 🔴 A media-only list prices no LLM turn, so it never joins the LLM set — and neither does KIE, whose
+   * list now prices MEDIA only. Both are loaded at the MEDIA doorways.
    */
-  it('never puts a media-only list (FAL) in the LLM set', () => {
+  it('never puts a media list (KIE, FAL) in the LLM set', () => {
     for (const platform of [...MARKET_PRICE_PROVIDERS, 'nonsense']) {
       expect(marketPriceProvidersFor(platform), platform).not.toContain('FAL');
+      expect(marketPriceProvidersFor(platform), platform).not.toContain('KIE');
     }
 
-    expect(LLM_PRICE_PROVIDERS).toEqual(['KIE', 'Comet', 'Anthropic']);
+    expect(LLM_PRICE_PROVIDERS).toEqual(['Anthropic']);
 
-    /* CONTROL: FAL IS a market price provider — the exclusion is deliberate, not a missing entry. */
+    /* CONTROL: KIE and FAL ARE market price providers — the exclusion is deliberate, not a missing entry. */
     expect(MARKET_PRICE_PROVIDERS).toContain('FAL');
+    expect(MARKET_PRICE_PROVIDERS).toContain('KIE');
 
     for (const mediaOnly of MEDIA_ONLY_PRICE_PROVIDERS) {
       expect(MARKET_PRICE_PROVIDERS as readonly string[], mediaOnly).toContain(mediaOnly);
     }
   });
 
+  /* Comet was removed outright (D5): no store slot, no baked list, nothing to price from. */
+  it('has no Comet list at all', () => {
+    expect([...MARKET_PRICE_PROVIDERS]).toEqual(['KIE', 'Anthropic', 'FAL']);
+    expect(MARKET_PRICE_PROVIDERS as readonly string[]).not.toContain('Comet');
+  });
+
   it('only ever names providers the store can actually serve', () => {
-    for (const platform of [...MARKET_PRICE_PROVIDERS, 'Anthropic', 'nonsense']) {
+    for (const platform of [...MARKET_PRICE_PROVIDERS, 'Comet', 'nonsense']) {
       for (const resolved of marketPriceProvidersFor(platform)) {
         expect(MARKET_PRICE_PROVIDERS).toContain(resolved);
       }
@@ -594,11 +590,11 @@ describe('the FAL price list', () => {
     expect(loaded?.media['fal-ai/minimax-music/v2.6'].variants[0].usd).toBe(0.2);
     expect(activeMarketPrices('FAL').media['fal-ai/minimax-music/v2.6'].variants[0].usd).toBe(0.2);
 
-    /* KIE and Comet are untouched: no pointer written, still their own baked tables. */
+    /* KIE and Anthropic are untouched: no pointer written, still their own baked tables. */
     expect(await readPointer(contextStore, 'KIE')).toBeNull();
-    expect(await readPointer(contextStore, 'Comet')).toBeNull();
+    expect(await readPointer(contextStore, 'Anthropic')).toBeNull();
     expect(activeMarketPrices('KIE')).toBe(BAKED_MARKET_PRICES);
-    expect(activeMarketPrices('Comet')).toBe(BAKED_COMET_PRICES);
+    expect(activeMarketPrices('Anthropic')).toBe(BAKED_ANTHROPIC_PRICES);
   });
 
   it('refuses to promote a FAL list carrying llm rows, and writes nothing', async () => {

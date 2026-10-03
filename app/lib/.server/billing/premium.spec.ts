@@ -74,7 +74,6 @@ import {
   DEFAULT_PREMIUM_MODEL,
   MODEL_RATES,
   getPremiumTier,
-  kieRates,
   providerRates,
   ratesFor,
 } from './rates';
@@ -731,23 +730,41 @@ describe('the premium tier config', () => {
   });
 
   /*
-   * A promoted list can reprice or add the premium row — the admin-panel path.
-   *
-   * ⚠️ The promoted price must be ABOVE every baked row for the model (6 > Anthropic's $4): since
-   * 2026-09-29 the rung reads every list and the most expensive row wins.
+   * A promoted ANTHROPIC list can reprice or add the premium row — the admin-panel path. Since
+   * 2026-10-03 (`_specs/anthropic-only_plan.md`) Anthropic's list is the only one that prices an LLM
+   * turn, so it is the only list a rung reads.
    */
-  it('prices the tier from a PROMOTED list when one is live', async () => {
+  it('prices the tier from a PROMOTED Anthropic list when one is live', async () => {
     stubPremium();
 
-    const result = await promoteMarketPrices(memoryStore(), 'KIE', {
-      ...BAKED_MARKET_PRICES,
-      llm: { ...BAKED_MARKET_PRICES.llm, [DEFAULT_PREMIUM_MODEL]: { inputPerMTok: 6, outputPerMTok: 30 } },
+    const result = await promoteMarketPrices(memoryStore(), 'Anthropic', {
+      ...BAKED_ANTHROPIC_PRICES,
+      llm: { ...BAKED_ANTHROPIC_PRICES.llm, [DEFAULT_PREMIUM_MODEL]: { inputPerMTok: 6, outputPerMTok: 30 } },
     });
     expect(result.ok).toBe(true);
 
     const tier = getPremiumTier({});
     expect(tier.rates.inputPerMTok).toBe(6);
     expect(tier.rates.cacheWritePerMTok, 'cache re-derives from the promoted base').toBeCloseTo(12, 9);
+  });
+
+  /*
+   * 🔴 KIE's list prices MEDIA only now. Its store format still carries `llm` rows, and an operator can
+   * still promote one — which must change no rung's price, in either direction. Before 2026-10-03 the
+   * rung read every list and the dearest row won, so a KIE row above Anthropic's repriced the rung.
+   */
+  it('ignores a PROMOTED KIE llm row — KIE prices no LLM turn', async () => {
+    stubPremium();
+
+    const result = await promoteMarketPrices(memoryStore(), 'KIE', {
+      ...BAKED_MARKET_PRICES,
+      llm: { ...BAKED_MARKET_PRICES.llm, [DEFAULT_PREMIUM_MODEL]: { inputPerMTok: 9, outputPerMTok: 45 } },
+    });
+    expect(result.ok).toBe(true);
+
+    const tier = getPremiumTier({});
+    expect(tier.rates.inputPerMTok).toBe(BAKED_ANTHROPIC_PRICES.llm[DEFAULT_PREMIUM_MODEL].inputPerMTok);
+    expect(tier.rates.inputPerMTok).not.toBe(9);
   });
 
   /*
@@ -793,26 +810,32 @@ describe('the premium model is priceable on every provider', () => {
     expect(anthropic['claude-opus-5'].inputPerMTok, 'Anthropic list price, not the KIE list row').toBe(5);
     expect(ratesFor('claude-opus-5', 'Anthropic', {}).inputPerMTok).toBe(5);
 
-    // ...and KIE keeps its own, cheaper, row for the same model. Same id, two prices, both correct.
-    expect(ratesFor('claude-opus-5', 'KIE', {}).inputPerMTok).toBe(2);
+    /*
+     * A historical row naming KIE (an LLM gateway until 2026-10-03) must bill at Anthropic's baked
+     * table — never at KIE's cheaper $2 row, which still sits in KIE's list but prices nothing.
+     */
+    expect(BAKED_MARKET_PRICES.llm['claude-opus-5'].inputPerMTok, 'control: KIE still carries a cheaper row').toBe(2);
+    expect(ratesFor('claude-opus-5', 'KIE', {}).inputPerMTok).toBe(5);
   });
 
   /*
-   * ⚠️ The fill case is a `gpt-*` id since 2026-08-12, and the reason is the whole finding of that day:
-   * this test used `claude-fable-5` on the belief that Anthropic bakes no row for it, and Anthropic sells
-   * it at $10/$50 — so the assertion below was pinning the KIE-shaped $4/$20 as the correct Anthropic
-   * price for a live rung (`PLATINUM_MODEL`), i.e. asserting a ~60% under-charge. **A fill case must be a
-   * model the vendor CANNOT price, never one it merely has not priced yet.**
+   * A rung selector Anthropic CANNOT price (a `gpt-*` id) used to be gap-filled into Anthropic's table
+   * from KIE's list at $1.40/$8.40. Since 2026-10-03 a rung is priced from Anthropic's list alone, so the
+   * selector is REFUSED at the decision point, nothing is injected, and a turn that somehow settled on it
+   * would bill at `ratesFor`'s most-expensive fallback — over-charging ourselves, never under-billing.
    */
-  it('injects a row into a provider that bakes none', () => {
+  it('refuses a rung selector Anthropic cannot price, and never gap-fills it from KIE', () => {
     stubPremium({ PREMIUM_MODEL: 'gpt-5-6-sol' });
 
-    // Anthropic bakes no GPT row and never will — this injection is what prices it.
     expect(MODEL_RATES['gpt-5-6-sol'], 'control: the gap is real').toBeUndefined();
-    expect(providerRates({}).Anthropic['gpt-5-6-sol'].inputPerMTok).toBe(1.4);
-    expect(providerRates({}).Anthropic['gpt-5-6-sol'].outputPerMTok).toBe(8.4);
+    expect(BAKED_MARKET_PRICES.llm['gpt-5-6-sol'], 'control: KIE still carries the row').toBeDefined();
 
-    expect(ratesFor('gpt-5-6-sol', 'Anthropic', {}).inputPerMTok).toBe(1.4);
+    expect(() => getPremiumTier({})).toThrow(/Marketplace price list/);
+    expect(providerRates({}).Anthropic).not.toHaveProperty('gpt-5-6-sol');
+
+    // The settlement fallback is the dearest row Anthropic knows (fable-5, $10/$50) — never KIE's $1.40.
+    expect(ratesFor('gpt-5-6-sol', 'Anthropic', {}).inputPerMTok).toBe(10);
+    expect(ratesFor('gpt-5-6-sol', 'Anthropic', {}).outputPerMTok).toBe(50);
   });
 
   /*
@@ -822,66 +845,54 @@ describe('the premium model is priceable on every provider', () => {
   it('leaves Anthropic its own row for the Platinum rung', () => {
     stubPremium({ PLATINUM_MODEL: 'claude-fable-5' });
 
-    expect(kieRates({})['claude-fable-5'].inputPerMTok, 'control: the lists disagree').toBe(4);
+    expect(BAKED_MARKET_PRICES.llm['claude-fable-5'].inputPerMTok, 'control: the lists disagree').toBe(4);
     expect(ratesFor('claude-fable-5', 'Anthropic', {}).inputPerMTok).toBe(10);
     expect(ratesFor('claude-fable-5', 'Anthropic', {}).outputPerMTok).toBe(50);
   });
 
-  it('is idempotent on KIE, which already bakes the identical row', () => {
+  /* KIE and Comet are no longer LLM gateways (2026-10-03): the platform bills Anthropic alone. */
+  it('has a rate table for Anthropic only — no KIE or Comet table to settle against', () => {
     stubPremium({ PREMIUM_MODEL: 'claude-fable-5' });
-    expect(providerRates({}).KIE['claude-fable-5']).toEqual({
-      inputPerMTok: 4,
-      outputPerMTok: 20,
-      cacheReadPerMTok: 0.4,
-      cacheWritePerMTok: 8.0,
-    });
+    expect(Object.keys(providerRates({}))).toEqual(['Anthropic']);
   });
 
   /*
-   * 🔴 THE INJECTION IS SCOPED TO THE RUNGS THE OPERATOR SELECTED — and this is the case that makes
-   * `stubPremium`'s scrub of `PREMIUM_MODEL` load-bearing rather than decorative (§4.6.1a, T14).
+   * 🔴 WHETHER A MODEL IS PRICED ON ANTHROPIC NEVER DEPENDS ON WHERE A SELECTOR POINTS (§4.6.1a, T14).
    *
-   * `providerRates` walks the WHOLE ladder and fills a gap for every rung, so a rung's selector can make
-   * a model priceable on Anthropic. That is correct behaviour and precisely why it is dangerous here: an
-   * unpriced model does not bill as free, it bills at the most expensive row we know of (`ratesFor`'s
-   * fallback), so "is this model priced?" is a question whose answer must never depend on where an
-   * operator happened to point a selector.
+   * An unpriced model does not bill as free, it bills at the most expensive row we know of (`ratesFor`'s
+   * fallback), so "is this model priced?" must never depend on where an operator happened to point a
+   * selector. Until 2026-10-03 a rung's selector could make a model priceable on Anthropic by gap-filling
+   * it from KIE's list, and this test proved the gap-fill was SCOPED to selected rungs. Since then a rung
+   * is priced from Anthropic's list alone, so the property is stronger: selecting the model changes
+   * nothing — the rung is refused and Anthropic's table still lacks it.
    *
-   * `claude-opus-4-7` is the probe because it is priced on the KIE-shaped Marketplace list and has NO
-   * baked Anthropic row — the one shape where filling and overwriting are distinguishable. With the
-   * ladder at its defaults nothing selects it, so no rung injects it and Anthropic still cannot price
-   * it. Set `PREMIUM_MODEL=claude-opus-4-7` and the rung injects the row, the assertion below inverts,
-   * and the failure lands on the machine of whoever configured it — with CI green, blaming code they
-   * never touched. That is the `oauth.spec.ts` trap, and the SAME leak `billing.spec.ts` records having
-   * fired twice already.
-   *
-   * The control half runs second and is what stops this from being a test that passes because the
-   * injection is broken: pointed at the probe deliberately, the rung must genuinely price it.
+   * `claude-opus-4-7` is the probe because KIE's list still prices it ($1.425/$7.15) and Anthropic's has
+   * NO row — the one shape where reading KIE's list again would make the assertions below invert.
    */
-  it('injects ONLY for rungs the operator selected — an unselected model stays unpriced on Anthropic', () => {
+  it('a selector cannot make a model priceable on Anthropic — selected or not, an unpriced model stays unpriced', () => {
     stubPremium();
 
     expect(MODEL_RATES, 'the probe must have no baked Anthropic row, or it proves nothing').not.toHaveProperty(
       'claude-opus-4-7',
     );
+    expect(BAKED_MARKET_PRICES.llm['claude-opus-4-7'], 'control: KIE still prices the probe').toBeDefined();
+    expect(providerRates({}).Anthropic).not.toHaveProperty('claude-opus-4-7');
+
+    stubPremium({ PREMIUM_MODEL: 'claude-opus-4-7' });
+
+    expect(() => getPremiumTier({})).toThrow(/Marketplace price list/);
     expect(providerRates({}).Anthropic).not.toHaveProperty('claude-opus-4-7');
 
     /*
-     * CONTROL — the paid rung really does inject, so the absence above is scope, not a dead lever.
-     * The base rates are asserted exactly (they are the billed numbers); the cache rates are compared
-     * loosely because they are DERIVED (0.1× read / 2.0× write) and `0.1 * 1.425` is not `0.1425` in
-     * IEEE 754 — pinning the float artifact would be pinning arithmetic noise, not a price.
+     * CONTROL — the table is not simply empty: a rung model Anthropic DOES price is present, at
+     * Anthropic's own rate.
      */
-    stubPremium({ PREMIUM_MODEL: 'claude-opus-4-7' });
-
-    const injected = providerRates({}).Anthropic['claude-opus-4-7'];
-
-    expect(injected.inputPerMTok).toBe(1.425);
-    expect(injected.outputPerMTok).toBe(7.15);
-    expect(injected.cacheReadPerMTok).toBeCloseTo(0.1425, 10);
-    expect(injected.cacheWritePerMTok).toBeCloseTo(2.85, 10);
+    stubPremium({ PREMIUM_MODEL: 'claude-opus-5' });
+    expect(getPremiumTier({}).model).toBe('claude-opus-5');
+    expect(providerRates({}).Anthropic['claude-opus-5'].inputPerMTok).toBe(5);
   });
 
+  /* A stale `LLM_PROVIDER=KIE` is ignored (Anthropic is the only LLM path), so the answer is identical. */
   it('getPremiumModel returns the configured premium model on the active provider', () => {
     stubPremium();
     vi.stubEnv('LLM_PROVIDER', 'KIE');

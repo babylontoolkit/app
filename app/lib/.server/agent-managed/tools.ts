@@ -242,6 +242,32 @@ export const MANAGED_CUSTOM_TOOLS: readonly BetaManagedAgentsCustomToolParams[] 
     },
     ['prompt'],
   ),
+
+  /*
+   * The project's MCP tools (§4.14, `_specs/managed-only_plan.md` D4). TWO constant tools rather than one
+   * custom tool per MCP tool: the agent's tool list is hashed and fixed per rung, and a per-project list
+   * would mean an idle-session update and a cold cache on every turn. The dispatcher resolves `mcp_call` by
+   * (server, tool) exactly and relays it to the user's sandbox; the servers themselves validate arguments.
+   */
+  custom(
+    'mcp_list_tools',
+    "List the MCP tools running in the user's sandbox for this project, with each tool's server, " +
+      'description and input schema. Call it when the user mentions an MCP tool or the turn message says ' +
+      'MCP tools are available.',
+    {},
+  ),
+  custom(
+    'mcp_call',
+    "Run one of the project's MCP tools in the user's sandbox and get its result. Pass the EXACT server and " +
+      "tool names from mcp_list_tools — two servers may expose the same tool name — and the tool's arguments " +
+      'as an object matching its input schema.',
+    {
+      server: str('The MCP server that owns the tool, exactly as mcp_list_tools reports it'),
+      tool: str('The tool name, exactly as mcp_list_tools reports it'),
+      arguments: { type: 'object', description: "The tool's arguments, matching its input schema" },
+    },
+    ['server', 'tool'],
+  ),
 ]);
 
 export const MANAGED_CUSTOM_TOOL_NAMES: readonly string[] = Object.freeze(MANAGED_CUSTOM_TOOLS.map((t) => t.name));

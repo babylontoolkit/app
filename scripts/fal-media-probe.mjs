@@ -8,8 +8,7 @@
  * (the docs say it still reports `COMPLETED`), which result field holds the file URL per model, whether
  * the file URL needs the key, and whether the transparent cut-out is REALLY transparent.
  *
- * Sibling of `cache-probe.mjs` / `kie-model-health.mjs` / `comet-audio-probe.mjs`: a committed
- * command rather than something re-derived, because the answers move when the vendor does.
+ * A committed command rather than something re-derived, because the answers move when the vendor does.
  *
  * ## It spends real money
  *

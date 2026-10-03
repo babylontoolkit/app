@@ -10,6 +10,21 @@
  *
  * `project_read` / `project_list` / `project_grep` are answered here on the server (`project-files.ts`).
  *
+ * ## Plan mode (`planMode`, `_specs/managed-only_plan.md` D1)
+ *
+ * A Plan turn is READ-ONLY, and the wall is HERE, on the server — never only in the message note. The agent's
+ * tool list stays constant (one provisioned agent per rung), so the dispatcher refuses what a Plan turn may
+ * not do: a write or edit outside `_specs/` (the legacy `planOnly` rule, `isPlanArtifactPath`, the same
+ * sentence), and every command, game check, in-game eval, media render (refused BEFORE any debit) and MCP
+ * call. Reads, the checklist and the read-only preview tools stay.
+ *
+ * ## MCP (`mcp_list_tools` / `mcp_call`, managed-only plan D4–D6)
+ *
+ * The project's MCP servers run in the user's sandbox (§4.14, §5). `mcp_list_tools` is answered here from the
+ * request's live list; `mcp_call` resolves the tool by `(server, tool)` EXACTLY — never by name alone (two
+ * servers may expose the same name, and a name-only lookup runs the call against the wrong process) — emits
+ * the same `mcp-tool-call` data part the legacy relay emits, and awaits the same `/api/agent/tool-result`.
+ *
  * ## A detached turn sends NOTHING back (D6)
  *
  * When the request is aborted (a closed tab, a superseding send), the relay resolves every pending
@@ -22,14 +37,18 @@ import type {
   BetaManagedAgentsTextBlock,
 } from '@anthropic-ai/sdk/resources/beta/sessions/events';
 import { createMediaTools, type MediaToolContext } from '~/lib/.server/agent/media-tools';
+import { awaitClientToolResult } from '~/lib/.server/agent/mcp-relay';
+import type { McpLiveTool, McpToolCallEvent } from '~/lib/.server/agent/mcp-tools';
 import { createPreviewTools, type PreviewToolCallEvent } from '~/lib/.server/agent/preview-tools';
 import {
   createWorkspaceTools,
+  PLAN_ONLY_REFUSAL,
   type WorkspaceOverlay,
   type WorkspaceToolCallEvent,
   type WorkspaceTurnState,
 } from '~/lib/.server/agent/workspace-tools';
 import type { TodoItem } from '~/lib/agent/workspace-protocol-types';
+import { isPlanArtifactPath } from '~/lib/chat/plan-artifacts';
 import type { FileMap } from '~/lib/.server/llm/constants';
 import { isGoogleVideoModel, mediaModelDefaults } from '~/lib/media/provider-defaults';
 import { projectGrep, projectList, projectRead } from './project-files';
@@ -64,6 +83,18 @@ export interface DispatchContext {
   media?: MediaToolContext | null;
 
   /**
+   * A Plan-mode turn (§4.2.9): read-only, with `_specs/` as the one write door (managed-only plan D1).
+   * Absent = a Build turn.
+   */
+  planMode?: boolean;
+
+  /**
+   * The project's MCP tools running in the user's sandbox (§4.14) and the relay emitter — `null`/absent when
+   * the turn carries none, in which case `mcp_call` says so (managed-only plan D4).
+   */
+  mcp?: { tools: McpLiveTool[]; emit: (event: McpToolCallEvent) => void } | null;
+
+  /**
    * A relayed call the browser did not answer in time (the relay's TIMER, `ClientToolResult.timedOut`).
    * The browser is treated as GONE, exactly like a closed tab (D6): the call is NOT answered — the session
    * waits at `requires_action` — and the engine detaches the request so a live tab can re-attach.
@@ -88,6 +119,96 @@ export const PREVIEW_TOOLS: readonly string[] = Object.freeze([
 ]);
 
 export const MEDIA_TOOLS: readonly string[] = Object.freeze(['generate_image', 'generate_video', 'generate_sound']);
+
+export const MCP_TOOLS: readonly string[] = Object.freeze(['mcp_list_tools', 'mcp_call']);
+
+/**
+ * What a Plan turn may NOT call at all (managed-only plan D1) — refused before anything runs or is debited.
+ * `project_write` / `project_edit` are not here: they are allowed inside `_specs/` and refused elsewhere.
+ */
+export const PLAN_REFUSED_TOOLS: ReadonlySet<string> = new Set([
+  'project_run',
+  'check_game',
+  'evaluate_in_game',
+  ...MEDIA_TOOLS,
+  'mcp_call',
+]);
+
+/** The refusal a Plan turn gets for a tool it may not call. Starts like `PLAN_ONLY_REFUSAL`, so it is an error. */
+export function planToolRefusal(name: string): string {
+  return (
+    `Plan mode is read-only: ${name} is not available on a Plan turn. Read the project, discuss, and write ` +
+    'planning files under _specs/ — the user switches back to Build mode to make changes.'
+  );
+}
+
+/** How much of one MCP tool's JSON Schema `mcp_list_tools` shows — the legacy relay's cap (`mcp-tools.ts`). */
+export const MCP_SCHEMA_MAX_CHARS = 1500;
+
+/** The most of one MCP result returned to the agent. A tool result is billed on every later request. */
+export const MCP_RESULT_MAX_CHARS = 50_000;
+
+/** `mcp_list_tools`'s answer. Pure. */
+export function describeMcpTools(tools: readonly McpLiveTool[]): string {
+  if (tools.length === 0) {
+    return "This project has no MCP tools running in the user's sandbox.";
+  }
+
+  const lines = tools.map((t) => {
+    const schema = t.inputSchema ? JSON.stringify(t.inputSchema) : '';
+    const shown =
+      schema.length > MCP_SCHEMA_MAX_CHARS ? `${schema.slice(0, MCP_SCHEMA_MAX_CHARS)}… (schema truncated)` : schema;
+
+    return (
+      `- server "${t.server}", tool "${t.name}": ${t.description?.trim() || 'A project MCP tool.'}` +
+      (shown ? `\n  input schema (JSON Schema): ${shown}` : '')
+    );
+  });
+
+  return (
+    `${tools.length} MCP tool(s) are running in the user's sandbox. Call one with mcp_call, passing its exact ` +
+    `server and tool names and its arguments:\n${lines.join('\n')}`
+  );
+}
+
+/**
+ * The live tool `mcp_call` names, by `(server, tool)` EXACTLY, or a refusal sentence. Never resolves by name
+ * alone — a name that exists only on ANOTHER server is named in the refusal, not run. Pure.
+ */
+export function resolveMcpCall(
+  tools: readonly McpLiveTool[],
+  input: Record<string, unknown>,
+): { tool: McpLiveTool; args: unknown } | { refusal: string } {
+  const server = typeof input.server === 'string' ? input.server.trim() : '';
+  const name = typeof input.tool === 'string' ? input.tool.trim() : '';
+
+  if (tools.length === 0) {
+    return { refusal: "The MCP tool could not run: this project has no MCP tools running in the user's sandbox." };
+  }
+
+  if (!server || !name) {
+    return {
+      refusal: 'The MCP tool could not run: mcp_call needs both "server" and "tool" — call mcp_list_tools to see them.',
+    };
+  }
+
+  const tool = tools.find((t) => t.server === server && t.name === name);
+
+  if (!tool) {
+    const elsewhere = tools.filter((t) => t.name === name).map((t) => `"${t.server}"`);
+
+    return {
+      refusal:
+        `The MCP tool "${name}" could not run: there is no tool "${name}" on server "${server}".` +
+        (elsewhere.length ? ` It exists on server ${elsewhere.join(', ')} — call it there.` : '') +
+        ' Call mcp_list_tools to see what is running.',
+    };
+  }
+
+  const args = input.arguments;
+
+  return { tool, args: args && typeof args === 'object' ? args : {} };
+}
 
 type Executable = {
   execute: (
@@ -151,6 +272,7 @@ const ERROR_SHAPES = [
   /^Plan mode is read-only/,
   /does not exist — create it with write_file/,
   /^The media generation (was refused|could not start)/,
+  /^The MCP tool .*could not run/,
   /^generate_\w+ (was refused|has no default model|needs a ")/,
   /is a Google Veo model, and Veo is generated through/,
 ];
@@ -174,17 +296,23 @@ export function createManagedDispatcher(ctx: DispatchContext): ManagedDispatcher
   /* Relayed calls whose relay TIMER fired — answered by nobody; the browser is gone (D6). */
   const timedOut = new Set<string>();
 
-  const workspace = createWorkspaceTools({
-    generationId: ctx.generationId,
-    userId: ctx.userId,
-    abortSignal: ctx.abortSignal,
-    emit: ctx.emitWorkspace,
-    emitTodos: ctx.emitTodos,
-    overlay: ctx.overlay,
-    state: ctx.state,
-    planOnly: false,
-    onRelayTimeout: (id) => timedOut.add(id),
-  }) as unknown as Record<string, Executable>;
+  const workspaceFor = (planOnly: boolean) =>
+    createWorkspaceTools({
+      generationId: ctx.generationId,
+      userId: ctx.userId,
+      abortSignal: ctx.abortSignal,
+      emit: ctx.emitWorkspace,
+      emitTodos: ctx.emitTodos,
+      overlay: ctx.overlay,
+      state: ctx.state,
+      planOnly,
+      onRelayTimeout: (id) => timedOut.add(id),
+    }) as unknown as Record<string, Executable>;
+
+  const workspace = workspaceFor(false);
+
+  /* Plan mode's `write_file` refuses every path outside `_specs/` on the server (`vetWritePath`). */
+  const planWorkspace = ctx.planMode ? workspaceFor(true) : null;
 
   const preview = createPreviewTools({
     generationId: ctx.generationId,
@@ -224,6 +352,33 @@ export function createManagedDispatcher(ctx: DispatchContext): ManagedDispatcher
       default:
     }
 
+    if (call.name === 'mcp_list_tools') {
+      return { content: [text(describeMcpTools(ctx.mcp?.tools ?? []))], isError: false };
+    }
+
+    if (ctx.planMode) {
+      if (PLAN_REFUSED_TOOLS.has(call.name)) {
+        return { content: [text(planToolRefusal(call.name))], isError: true };
+      }
+
+      if (call.name === 'project_write') {
+        return runWorkspace(planWorkspace!.write_file, call, input);
+      }
+
+      if (call.name === 'project_edit') {
+        const raw = typeof input.file_path === 'string' && input.file_path.trim() ? input.file_path : input.path;
+
+        /* The `_specs/` door only: an edit anywhere else is refused with the legacy sentence. */
+        if (typeof raw !== 'string' || !isPlanArtifactPath(raw)) {
+          return { content: [text(PLAN_ONLY_REFUSAL)], isError: true };
+        }
+      }
+    }
+
+    if (call.name === 'mcp_call') {
+      return runMcp(call, input);
+    }
+
     const legacyName = WORKSPACE_TOOL_FOR[call.name];
     const tool = legacyName
       ? workspace[legacyName]
@@ -239,10 +394,52 @@ export function createManagedDispatcher(ctx: DispatchContext): ManagedDispatcher
       return { content: [text(`Unknown tool "${call.name}".`)], isError: true };
     }
 
+    return runWorkspace(tool, call, input);
+  }
+
+  async function runWorkspace(tool: Executable, call: CustomToolUse, input: Record<string, unknown>) {
     const result = await tool.execute(input, { toolCallId: call.id, messages: [], abortSignal: ctx.abortSignal });
     const content = toResultBlocks(tool, result);
 
     return { content, isError: looksLikeFailure(content) };
+  }
+
+  /**
+   * `mcp_call` (managed-only plan D4, D5): run one project MCP tool in the user's sandbox through the §4.14
+   * relay. A relay TIMEOUT is answered to the agent as a failure (a slow third-party server is the usual
+   * cause) — unlike a workspace timeout, which detaches; a detached request still answers nothing
+   * (`dispatch` drops the answer when the signal is aborted).
+   */
+  async function runMcp(call: CustomToolUse, input: Record<string, unknown>): Promise<ToolAnswer> {
+    const resolved = resolveMcpCall(ctx.mcp?.tools ?? [], input);
+
+    if ('refusal' in resolved) {
+      return { content: [text(resolved.refusal)], isError: true };
+    }
+
+    const { tool, args } = resolved;
+
+    ctx.mcp!.emit({ toolCallId: call.id, toolName: tool.name, server: tool.server, args });
+
+    const outcome = await awaitClientToolResult({
+      generationId: ctx.generationId,
+      toolCallId: call.id,
+      userId: ctx.userId,
+      abortSignal: ctx.abortSignal,
+    });
+
+    if (outcome.error) {
+      return { content: [text(`The MCP tool "${tool.name}" could not run: ${outcome.error}`)], isError: true };
+    }
+
+    const body = stringify(outcome.result ?? null) || '(no output)';
+    const shown =
+      body.length > MCP_RESULT_MAX_CHARS
+        ? `${body.slice(0, MCP_RESULT_MAX_CHARS)}\n… (result truncated: ${body.length} characters, the first ${MCP_RESULT_MAX_CHARS} shown)`
+        : body;
+
+    /* Untrusted (§4.14) — the sandbox server's own answer, returned for the agent to read. */
+    return { content: [text(shown)], isError: false };
   }
 
   /**

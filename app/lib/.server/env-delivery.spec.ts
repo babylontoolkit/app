@@ -35,7 +35,6 @@ const READS = [
 /** Names built at runtime (`${provider.toUpperCase()}_ENHANCE_PROMPT_MODEL`, env-models.ts) — one per text gateway. */
 const COMPUTED = [
   'KIE_ENHANCE_PROMPT_MODEL',
-  'COMET_ENHANCE_PROMPT_MODEL',
   'ANTHROPIC_ENHANCE_PROMPT_MODEL',
 
   /* `${prefix}_OAUTH_CLIENT_ID` / `_SECRET`, prefix GITHUB | GITLAB (git/oauth.ts). */

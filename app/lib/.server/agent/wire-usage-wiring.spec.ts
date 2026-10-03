@@ -101,7 +101,6 @@ describe('every Anthropic-wire provider taps its fetch', () => {
   it.each([
     ['anthropic.ts', 'app/lib/modules/llm/providers/anthropic.ts'],
     ['kie.ts (Claude branch)', 'app/lib/modules/llm/providers/kie.ts'],
-    ['cometapi.ts (Claude branch)', 'app/lib/modules/llm/providers/cometapi.ts'],
   ])('%s', (_name, file) => {
     expect(codeOnly(read(file))).toContain('tapWireUsage(options.wireUsage');
   });

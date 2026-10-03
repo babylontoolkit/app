@@ -22,7 +22,7 @@ afterEach(() => {
   setManagedClientForTests(undefined);
 });
 
-describe('resolveAgentEngine — managed is the default, legacy is the kill switch', () => {
+describe('resolveAgentEngine — Anthropic Managed Agents is the only engine (2026-10-03)', () => {
   it('unset → managed', () => {
     expect(resolveAgentEngine(ctx({}))).toBe('managed');
   });
@@ -31,47 +31,41 @@ describe('resolveAgentEngine — managed is the default, legacy is the kill swit
     expect(resolveAgentEngine(undefined)).toBe('managed');
   });
 
-  it('"legacy" → legacy', () => {
-    expect(resolveAgentEngine(ctx({ AGENT_ENGINE: 'legacy' }))).toBe('legacy');
-  });
-
-  it('" legacy " (whitespace) → legacy', () => {
-    expect(resolveAgentEngine(ctx({ AGENT_ENGINE: ' legacy ' }))).toBe('legacy');
-  });
-
   it('"managed" → managed', () => {
     expect(resolveAgentEngine(ctx({ AGENT_ENGINE: 'managed' }))).toBe('managed');
   });
 
-  it('the process env is honoured too (a deploy sets it there)', () => {
-    vi.stubEnv('AGENT_ENGINE', 'legacy');
-    expect(resolveAgentEngine(ctx({}))).toBe('legacy');
+  /* The old kill switch is gone: `legacy` (any spelling, either env source) still runs managed. */
+  it.each(['legacy', ' legacy ', 'LEGACY'])('%j → managed (the kill switch was removed)', (value) => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect(resolveAgentEngine(ctx({ AGENT_ENGINE: value }))).toBe('managed');
   });
 
-  it('junk → managed, with a one-time warning naming the value', () => {
+  it('the process env cannot select the old engine either', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.stubEnv('AGENT_ENGINE', 'legacy');
+    expect(resolveAgentEngine(ctx({}))).toBe('managed');
+  });
+
+  it('a set non-managed value warns ONCE per value, naming it (a stale env line must surface somewhere)', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const value = `legasy-${Math.random().toString(36).slice(2)}`;
+    const value = `legacy-${Math.random().toString(36).slice(2)}`;
 
     expect(resolveAgentEngine(ctx({ AGENT_ENGINE: value }))).toBe('managed');
     expect(resolveAgentEngine(ctx({ AGENT_ENGINE: value }))).toBe('managed');
 
     const calls = warn.mock.calls.filter((args) => String(args[0]).includes(value));
     expect(calls).toHaveLength(1);
+    expect(String(calls[0][0])).toMatch(/ignored/);
   });
 
-  it('CONTROL: recognised values never warn', () => {
+  it('CONTROL: unset and "managed" never warn', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 
     resolveAgentEngine(ctx({}));
     resolveAgentEngine(ctx({ AGENT_ENGINE: 'managed' }));
-    resolveAgentEngine(ctx({ AGENT_ENGINE: 'legacy' }));
 
     expect(warn).not.toHaveBeenCalled();
-  });
-
-  it('case is not folded: "LEGACY" is not the kill switch (exact value only)', () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    expect(resolveAgentEngine(ctx({ AGENT_ENGINE: 'LEGACY' }))).toBe('managed');
   });
 });
 

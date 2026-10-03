@@ -678,20 +678,25 @@ describe('an unresolvable platform model falls back rather than failing the sess
    * ⚠️ WHEN IT IS FIXED, FLIP THIS TEST — 200 with `standardModel === DEFAULT_MODEL` is the intended
    * direction, and this expectation failing means someone did the right thing.
    */
-  it('FINDING (pre-existing) — an invalid LLM_PROVIDER still 503s the whole session endpoint', async () => {
+  /*
+   * FLIPPED 2026-10-03: `getPlatformProvider` no longer throws — Anthropic is the only provider and a stale
+   * or typo'd `LLM_PROVIDER` is ignored with a warning (`_specs/anthropic-only_plan.md` D3), so the session
+   * endpoint serves normally. This is the "intended direction" the finding above asked for.
+   */
+  it("a typo'd or retired LLM_PROVIDER no longer takes the session endpoint down", async () => {
     stubSessionEnv({ LLM_PROVIDER: 'Kei' });
 
-    const { status } = await callMe();
+    const { status, body } = await callMe();
 
-    expect(status).toBe(503);
+    expect(status).toBe(200);
+    expect(body.credits?.modelTiers.standardModel).toBe(DEFAULT_MODEL);
   });
 
   /*
-   * CONTROL for the finding above: the same variable set to a REAL provider is fine, so the 503 is
-   * about validation failing open into the loader's catch and not about the variable being read at all.
+   * CONTROL: the one real provider is served normally too.
    */
-  it('CONTROL — a valid LLM_PROVIDER is served normally', async () => {
-    stubSessionEnv({ LLM_PROVIDER: 'KIE' });
+  it('CONTROL — LLM_PROVIDER=Anthropic is served normally', async () => {
+    stubSessionEnv({ LLM_PROVIDER: 'Anthropic' });
 
     const { status, body } = await callMe();
 

@@ -18,7 +18,7 @@ import {
   type MarketPriceList,
 } from './market-prices';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
-import { BAKED_COMET_PRICES } from './baked-comet-prices';
+import { BAKED_ANTHROPIC_PRICES } from './baked-anthropic-prices';
 import { BAKED_FAL_PRICES } from './baked-fal-prices';
 import { FAMILY_PREFIXES } from '~/lib/modules/llm/model-families';
 
@@ -63,110 +63,87 @@ describe('validation — the promotion wall', () => {
   });
 
   /*
-   * The SAME wall for the second marketplace's fallback (2026-08-10, `baked-comet-prices.ts`).
+   * The SAME wall for the Anthropic fallback — the list that prices EVERY LLM turn since 2026-10-03
+   * (`_specs/anthropic-only_plan.md` D4).
    *
    * A baked list its own validator refuses is a uniquely bad state: `loadVersion` re-validates on read
    * and `promoteMarketPrices` validates before writing, but the baked table is served WITHOUT passing
    * either — it is the thing served when validation has nothing to say. So an invalid one does not
-   * fail loudly, it silently becomes the prices charged on that provider forever.
+   * fail loudly, it silently becomes the prices charged forever.
+   *
+   * (This block pinned the Comet list until Comet was removed, 2026-10-03.)
    */
-  it('accepts the baked Comet list — its fallback is served without ever passing validation', () => {
-    const result = validateMarketPriceList(BAKED_COMET_PRICES, 'Comet');
+  it('accepts the baked Anthropic list — its fallback is served without ever passing validation', () => {
+    const result = validateMarketPriceList(BAKED_ANTHROPIC_PRICES, 'Anthropic');
     expect(result.ok, result.ok ? '' : (result as { errors: string[] }).errors.join('; ')).toBe(true);
   });
 
   /*
-   * 🔴 The platform default has to be priced on EVERY marketplace, not just on the one that happened
-   * to be shipping when the rule was written. `ratesFor` bills an unpriced model at the most expensive
-   * row, so a Comet list missing this row would bill every ordinary generation at the priciest
-   * Claude rung — silently, and only on that provider.
+   * 🔴 The platform default has to be priced on the list that bills it. `ratesFor` bills an unpriced
+   * model at the most expensive row, so an Anthropic list missing this row would bill every ordinary
+   * generation at the priciest Claude rung — silently.
    */
-  it('prices the platform default on the Comet list too', () => {
-    expect(BAKED_COMET_PRICES.llm[DEFAULT_MODEL], `${DEFAULT_MODEL} is unpriced on Comet`).toBeDefined();
-    expect(BAKED_COMET_PRICES.llm[DEFAULT_MODEL].inputPerMTok).toBeGreaterThan(0);
-    expect(BAKED_COMET_PRICES.llm[DEFAULT_MODEL].outputPerMTok).toBeGreaterThan(0);
+  it('prices the platform default on the Anthropic list', () => {
+    expect(BAKED_ANTHROPIC_PRICES.llm[DEFAULT_MODEL], `${DEFAULT_MODEL} is unpriced on Anthropic`).toBeDefined();
+    expect(BAKED_ANTHROPIC_PRICES.llm[DEFAULT_MODEL].inputPerMTok).toBeGreaterThan(0);
+    expect(BAKED_ANTHROPIC_PRICES.llm[DEFAULT_MODEL].outputPerMTok).toBeGreaterThan(0);
   });
 
   /*
-   * The family rule is a property of the LIST, not of a vendor: Comet quotes no cached rate for
-   * anything, so every `claude-*` row derives (0.1x read / 2.0x the 1h write) and the pair is REFUSED
-   * on the way in. Asserted against a Comet row rather than assumed from the KIE tests above, because
-   * "the rule follows the model family, not the marketplace" is exactly the thing a per-provider store
-   * makes it easy to get wrong.
+   * The family rule is a property of the LIST, not of a vendor: a promoted claude row derives its cache
+   * rates (0.1x read / 2.0x the 1h write) and the pair is REFUSED on the way in. Asserted against an
+   * Anthropic row rather than assumed from the KIE tests, because "the rule follows the model family,
+   * not the marketplace" is exactly the thing a per-provider store makes it easy to get wrong.
    */
-  it('refuses quoted cache rates on a Comet claude row, exactly as on KIE', () => {
+  it('refuses quoted cache rates on an Anthropic claude row, exactly as on KIE', () => {
     const list: MarketPriceList = {
-      ...BAKED_COMET_PRICES,
+      ...BAKED_ANTHROPIC_PRICES,
       llm: {
-        ...BAKED_COMET_PRICES.llm,
-        [DEFAULT_MODEL]: { ...BAKED_COMET_PRICES.llm[DEFAULT_MODEL], cachedInputPerMTok: 0.16 },
+        ...BAKED_ANTHROPIC_PRICES.llm,
+        [DEFAULT_MODEL]: { ...BAKED_ANTHROPIC_PRICES.llm[DEFAULT_MODEL], cachedInputPerMTok: 0.16 },
       },
     };
 
-    expect(errorsOf(list).join()).toMatch(/cache rates derive/i);
+    expect((validateMarketPriceList(list, 'Anthropic') as { errors?: string[] }).errors?.join() ?? '').toMatch(
+      /cache rates derive/i,
+    );
 
     /* Control: the same list without the quote is accepted, so the refusal is about the cache key. */
-    expect(validateMarketPriceList(BAKED_COMET_PRICES, 'Comet').ok).toBe(true);
+    expect(validateMarketPriceList(BAKED_ANTHROPIC_PRICES, 'Anthropic').ok).toBe(true);
   });
 
   /*
-   * An EMPTY media table is valid and is the correct state for Comet (no longer a media gateway).
+   * An EMPTY media table is valid and is the correct state for Anthropic (it renders no media).
    * `lookupMediaPrice` has no most-expensive fallback — media debits run BEFORE spend — so an unpriced
    * media model is REFUSED rather than guessed, and a speculative row is the one shape that would turn
    * that refusal into a wrong charge.
    */
   it('accepts an empty media table — no media rows is a refusal, never a guess', () => {
-    /*
-     * Comet is no longer a media gateway (2026-10-01), so its SHIPPED list is exactly this case: no
-     * media rows, and it must validate — every Comet render is refused at quote time, never a rejected
-     * promotion of its LLM rows.
-     */
-    expect(BAKED_COMET_PRICES.media).toEqual({});
-    expect(validateMarketPriceList(BAKED_COMET_PRICES, 'Comet').ok).toBe(true);
+    expect(BAKED_ANTHROPIC_PRICES.media).toEqual({});
+    expect(validateMarketPriceList(BAKED_ANTHROPIC_PRICES, 'Anthropic').ok).toBe(true);
 
     // CONTROL: the media table is not what makes the list valid — the LLM rows are really there.
-    expect(Object.keys(BAKED_COMET_PRICES.llm).length).toBeGreaterThan(0);
+    expect(Object.keys(BAKED_ANTHROPIC_PRICES.llm).length).toBeGreaterThan(0);
   });
 
   /*
-   * WHICH models the Comet list can bill — the rates themselves are pinned in `comet-prices.spec.ts`.
-   *
-   * ⚠️ This used to carry the rate literals too, and T5 moved them: that file pins each row TWICE (once
-   * against `official x ratio` from `COMET_PRICE_PROVENANCE`, once as a literal), and a third copy here
-   * is a number that can drift out of agreement with the other two while every test stays green. What
-   * belongs in THIS file is the question validation asks — which ids does this marketplace claim to
-   * price — so that adding or removing a row stays a deliberate act rather than a silent one.
-   *
-   * ⚠️ `claude-haiku-4-5` is absent because it is a hard 400 on this provider ("has not been priced by
-   * the administrator yet"); Comet serves the dated `claude-haiku-4-5-20251001` instead — live-probed
-   * and added 2026-08-11 so `COMET_ENHANCE_PROMPT_MODEL` has something to resolve against, since
-   * `getEnhancerModel` REFUSES a model this table cannot price. The two spellings are one model and
-   * exactly one of them may be here; the full evidence, and the reason re-adding the bare id needs a
-   * fresh probe rather than a copy from the spec's table, is in `comet-prices.spec.ts` — do not
-   * "restore" the bare row from this list.
-   *
-   * The three `chat` rows are priced but NOT offered in `COMET_MODELS`, deliberately: pricing a model
-   * an operator has not selected costs nothing, while LISTING an unprobed id ships a 404.
+   * WHICH models the Anthropic list can bill. Adding or removing a row must stay a deliberate act: a row
+   * here is what makes a selector (`LLM_MODEL`, `PREMIUM_MODEL`, `PLATINUM_MODEL`) serveable at all.
    */
-  it('pins which models the Comet list prices — rates live in comet-prices.spec.ts', () => {
-    expect(Object.keys(BAKED_COMET_PRICES.llm).sort()).toEqual([
+  it('pins which models the Anthropic list prices', () => {
+    expect(Object.keys(BAKED_ANTHROPIC_PRICES.llm).sort()).toEqual([
       'claude-fable-5',
       'claude-fable-5-1',
-      'claude-haiku-4-5-20251001',
+      'claude-haiku-4-5',
       'claude-opus-4-8',
       'claude-opus-5',
       'claude-opus-5-5',
       'claude-sonnet-5',
       'claude-sonnet-5-5',
-      'grok-4.5',
-      'kimi-k3',
-      'qwen3-coder',
     ]);
 
-    expect(BAKED_COMET_PRICES.llm['claude-haiku-4-5'], 'a hard 400 on Comet — never priced').toBeUndefined();
-
     /* Every row must be a family the validator recognises, or the list cannot be promoted at all. */
-    for (const model of Object.keys(BAKED_COMET_PRICES.llm)) {
+    for (const model of Object.keys(BAKED_ANTHROPIC_PRICES.llm)) {
       expect(
         FAMILY_PREFIXES.some(([prefix]) => model.startsWith(prefix)),
         `${model} names no family`,
@@ -305,7 +282,8 @@ describe('validation — the promotion wall', () => {
   });
 
   /*
-   * The `chat` family (Comet, 2026-08-10) carries the SAME `none` profile as gemini and for the same
+   * The `chat` family (added for Comet 2026-08-10; no gateway serves it since Comet's removal on
+   * 2026-10-03, but it stays in the family table — `_specs/anthropic-only_plan.md` D7) carries the SAME `none` profile as gemini and for the same
    * reason — no vendor among Grok/Kimi/Qwen/GLM/DeepSeek/MiniMax publishes a cached rate — so a row
    * quoting only the base pair is the complete, correct row. Accepting it is what makes the family
    * priceable at all; the ACCEPT case is easy to lose while tightening the refusals around it.
@@ -652,7 +630,7 @@ describe('media-only price lists (FAL)', () => {
   });
 
   it('does not treat the FAL list as valid for an LLM provider (control the other way)', () => {
-    expect(validateMarketPriceList(BAKED_FAL_PRICES, 'Comet').ok).toBe(false);
+    expect(validateMarketPriceList(BAKED_FAL_PRICES, 'Anthropic').ok).toBe(false);
   });
 
   it('declares exactly FAL as media-only, matched exactly', () => {

@@ -27,7 +27,7 @@ const codeOnly = (source: string) =>
 
 const proxy = () => codeOnly(read('app/lib/.server/agent/proxy.ts'));
 const engine = () => codeOnly(read('app/lib/.server/agent-managed/engine.ts'));
-const enhancer = () => codeOnly(read('app/routes/api.enhancer.ts'));
+const enhancer = () => codeOnly(read('app/lib/.server/agent-managed/enhance.ts'));
 
 /** The body of the proxy's `run()` generator — where every provider call of a legacy turn happens. */
 const runBody = (source: string) => {
@@ -95,14 +95,20 @@ describe('managed engine (engine.ts)', () => {
   });
 });
 
-describe('prompt enhancer (api.enhancer.ts)', () => {
-  it('opens the running row before streamText', () => {
+/*
+ * The enhancer runs on Managed Agents since 2026-10-03 (`agent-managed/enhance.ts`): the session is created
+ * first (no spend — and the row must NAME it, so the sweep can price a dead enhancement), then the row is
+ * opened, then the turn sends the message that spends.
+ */
+describe('prompt enhancer (agent-managed/enhance.ts)', () => {
+  it('opens the running row (naming the session) before the turn that spends', () => {
     const source = enhancer();
     const open = source.indexOf('openRunningGeneration(');
-    const stream = source.indexOf('await streamText(');
+    const spend = source.indexOf('runManagedTurn(');
 
     expect(open).toBeGreaterThan(-1);
-    expect(open).toBeLessThan(stream);
+    expect(open).toBeLessThan(spend);
+    expect(source.slice(open, spend)).toContain('managedSessionId: sessionId');
   });
 });
 
@@ -110,7 +116,7 @@ describe('CONTROLS', () => {
   it('reads the real files', () => {
     expect(proxy()).toContain('export async function runAgentGeneration(');
     expect(engine()).toContain('export async function runManagedGeneration(');
-    expect(enhancer()).toContain('await streamText(');
+    expect(enhancer()).toContain('runManagedTurn(');
   });
 
   it('finds the run() body and the first provider call inside it', () => {

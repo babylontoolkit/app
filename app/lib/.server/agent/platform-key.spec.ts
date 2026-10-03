@@ -4,48 +4,29 @@
  *
  * ## Why this file exists at all
  *
- * Until T3 there was NO spec anywhere for these three functions — `grep requirePlatformKey app
- * --include="*.spec.ts"` returned nothing — and `platformKeyFor` was:
+ * Until T3 there was NO spec anywhere for these three functions, and `platformKeyFor` was a ternary
+ * (`provider === 'KIE' ? kieApiKey : anthropicApiKey`) that silently resolved the ANTHROPIC key on a
+ * Comet deploy — the wrong vendor's money on a box holding both keys, and a "not configured" error
+ * naming the wrong variable on a box holding only the right one. The record that replaced it is what
+ * these tests guard.
  *
- *     config.provider === 'KIE' ? config.kieApiKey : config.anthropicApiKey
+ * ## Since 2026-10-03 there is ONE LLM provider (`_specs/anthropic-only_plan.md`)
  *
- * A ternary is exhaustive for exactly two providers and silently wrong for the third. With Comet
- * added to `PLATFORM_PROVIDERS`, that expression resolved the **ANTHROPIC** key on a Comet deploy,
- * and it failed in two directions at once, neither of which throws anything a reader could trace back
- * to this file:
+ * Anthropic Managed Agents is the only LLM path; KIE and fal are MEDIA providers only, and Comet is
+ * gone. That makes the per-provider matrix this file used to generate collapse to one row — but the
+ * property it existed for is still live, and is now sharper: **the LLM key is `ANTHROPIC_API_KEY` and
+ * nothing else.** A deploy still carrying `KIE_API_KEY` (which is now the MEDIA key — `MEDIA_KEY_ENV`)
+ * or a stale `COMET_API_KEY` must never have either spent on a text turn, and a stale `LLM_PROVIDER=KIE`
+ * must not route the key lookup anywhere but Anthropic. Missing key → a describable 503 naming
+ * `ANTHROPIC_API_KEY`, never a fallback.
  *
- *   - a box holding BOTH keys spends the Anthropic credential — the wrong vendor's money, at roughly
- *     **2.3x** the price the operator deliberately chose (`config.ts`'s own measured figure), on a
- *     provider they never selected;
- *   - a box holding ONLY `COMET_API_KEY` reports *"the platform LLM key for Comet is not
- *     configured"* while holding it, which sends the operator to fix a variable that is already set.
+ * 🔴 Cases are still generated from the DECLARED UNION `PLATFORM_PROVIDERS` (with a CONTROL that it is
+ * non-empty), and `EXPECTED_KEY_ENV` / `SENTINEL` are `Record<PlatformProviderName, …>`, so a provider
+ * re-added later arrives here as a compile error and a failing test, never as an untested branch.
  *
- * The compiler cannot help with either: a `Record<PlatformProviderName, …>` breaks the build when a
- * provider is added, a `? :` does not. So the record is the fix and this file is the guard on it.
- *
- * ## How these tests are built, and why that shape
- *
- * 🔴 **Every case is generated from the DECLARED UNION `PLATFORM_PROVIDERS`, never a hand-written
- * list.** This repo's `coversWorkspace` entry records the general lesson: a gate written as an
- * enumeration of the doors someone thought of cannot see the door they missed, and a test written
- * against that same enumeration cannot either. Iterating the union means a fourth provider arrives
- * here as a failing test rather than as an untested branch. `EXPECTED_KEY_ENV` and `SENTINEL` below
- * are typed `Record<PlatformProviderName, …>`, so a new provider is *also* a compile error in this
- * file — it cannot be silently skipped.
- *
- * ⚠️ **A `for…of` loop that generates cases reports a clean bill of health when it generates none.**
- * The `no-server-storage.spec.ts` scanner lesson applies to parameterised tests too, so the union is
- * asserted non-trivial before anything is derived from it.
- *
- * Sentinels are DISTINCT per key, so a wrong answer is unambiguous — an assertion against `'k'` for
- * every provider would pass for a function that returns the first key it finds.
- *
- * ⚠️ `env()` falls back to `process.env` and Vitest loads `.env.local`, which on this machine really
- * does carry a live `COMET_API_KEY` (plus `LLM_PROVIDER`, `LLM_MODEL`, `PREMIUM_MODEL`). The section
- * that drives `getPlatformConfig` scrubs the WHOLE chain — the `oauth.spec.ts` trap, which has already
- * fired twice in this repo for want of one sibling in a scrub list. Without it, "this provider has no
- * key" grades against the operator's real credentials and passes on CI while failing only on the
- * machine of the person who configured the provider.
+ * ⚠️ `env()` falls back to `process.env` and Vitest loads `.env.local`, which on a developer machine
+ * carries real keys (and possibly `LLM_PROVIDER` / `LLM_MODEL` / `PREMIUM_MODEL`). The WHOLE chain is
+ * scrubbed before every case — the `oauth.spec.ts` trap.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -69,57 +50,24 @@ import {
  */
 const EXPECTED_KEY_ENV: Record<PlatformProviderName, string> = {
   Anthropic: 'ANTHROPIC_API_KEY',
-  KIE: 'KIE_API_KEY',
-  Comet: 'COMET_API_KEY',
 };
 
 /** Distinct per provider, so "it returned *a* key" and "it returned *the right* key" cannot be confused. */
 const SENTINEL: Record<PlatformProviderName, string> = {
   Anthropic: 'sentinel-ANTHROPIC-key',
-  KIE: 'sentinel-KIE-key',
-  Comet: 'sentinel-COMETAPI-key',
 };
-
-/** Which `PlatformConfig` field each provider's key arrives in. */
-const KEY_FIELD: Record<PlatformProviderName, 'anthropicApiKey' | 'kieApiKey' | 'cometApiKey'> = {
-  Anthropic: 'anthropicApiKey',
-  KIE: 'kieApiKey',
-  Comet: 'cometApiKey',
-};
-
-/** A config holding EVERY provider's key. The state where a wrong lookup spends the wrong vendor. */
-function configWithAllKeys(provider: PlatformProviderName): PlatformConfig {
-  return {
-    provider,
-    anthropicApiKey: SENTINEL.Anthropic,
-    kieApiKey: SENTINEL.KIE,
-    cometApiKey: SENTINEL.Comet,
-    proFeaturesEnabled: false,
-  };
-}
-
-/** A config holding every key EXCEPT this provider's — the "reports not configured" half. */
-function configWithoutOwnKey(provider: PlatformProviderName): PlatformConfig {
-  const config = configWithAllKeys(provider);
-  config[KEY_FIELD[provider]] = undefined;
-
-  return config;
-}
 
 /**
- * Everything that can decide which provider is configured or which key is present.
- *
- * `LLM_MODEL` / `PREMIUM_MODEL` do not reach these functions today; they are scrubbed anyway because
- * this machine has both set to `gpt-*` values, and a future field on `PlatformConfig` reading one of
- * them would otherwise inherit the developer's environment into every case here, silently.
- *
- * ⚠️ `AUTO_MODEL_SELECT` / `LLM_PROVIDER_CHAIN` were added on 2026-08-10 and are the reason this list
- * is a list rather than just `LLM_PROVIDER`. The ladder OUTRANKS `LLM_PROVIDER` — with the flag on,
- * `getPlatformConfig` may serve a different gateway entirely — so an unscrubbed flag turns every case
- * below into a test of the ladder instead of a test of the key lookup. It is on in this repo's own
- * `.env.local`, which means the failure appears ONLY on the machine of whoever enabled the feature,
- * with CI green: the `oauth.spec.ts` trap, and the fourth time it has fired here.
+ * The variables of the RETIRED LLM providers. `KIE_API_KEY` is still read — as the MEDIA key — and
+ * `COMET_API_KEY` may linger in an old deploy's SSM; neither may ever be spent on an LLM turn.
  */
+const RETIRED_LLM_KEY_ENV = ['KIE_API_KEY', 'COMET_API_KEY'] as const;
+const RETIRED_SENTINEL: Record<(typeof RETIRED_LLM_KEY_ENV)[number], string> = {
+  KIE_API_KEY: 'sentinel-KIE-key',
+  COMET_API_KEY: 'sentinel-COMETAPI-key',
+};
+
+/** Everything that can decide which provider is configured or which key is present. */
 const KEY_ENV = [
   'LLM_PROVIDER',
   'AUTO_MODEL_SELECT',
@@ -142,18 +90,22 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/** Set every retired provider's key variable — the state where a fallback would spend the wrong key. */
+function stubRetiredKeys(): void {
+  for (const key of RETIRED_LLM_KEY_ENV) {
+    vi.stubEnv(key, RETIRED_SENTINEL[key]);
+  }
+}
+
 describe('the provider union these tests are generated from', () => {
   /*
-   * CONTROL. Every `describe` below derives its cases from `PLATFORM_PROVIDERS`, and a parameterised
-   * suite over an empty list runs zero tests and reports green. Pin that the union is real, and that
-   * it contains the provider whose absence from the old ternary was the whole defect.
+   * CONTROL. Every parameterised `describe` below derives its cases from `PLATFORM_PROVIDERS`, and a
+   * suite over an empty list runs zero tests and reports green.
    */
-  it('is non-empty and includes all three shipping providers', () => {
-    expect(PLATFORM_PROVIDERS.length).toBeGreaterThanOrEqual(3);
-    expect([...PLATFORM_PROVIDERS]).toEqual(expect.arrayContaining(['Anthropic', 'KIE', 'Comet']));
+  it('is exactly Anthropic — the only LLM provider since 2026-10-03', () => {
+    expect([...PLATFORM_PROVIDERS]).toEqual(['Anthropic']);
   });
 
-  /* A provider added to the union with no row here is a compile error above and a red test here. */
   it('every declared provider has a sentinel and an expected env var in this file', () => {
     for (const provider of PLATFORM_PROVIDERS) {
       expect(SENTINEL[provider], `no sentinel for ${provider}`).toBeTruthy();
@@ -162,52 +114,41 @@ describe('the provider union these tests are generated from', () => {
   });
 });
 
-describe('requirePlatformKey — a provider spends ITS OWN key, never a neighbour’s', () => {
-  /*
-   * 🔴 THE CASE THE TERNARY GOT WRONG. All three keys present: the only way to be right is to look
-   * the provider up. Falling through to Anthropic (what `provider === 'KIE' ? kie : anthropic` did)
-   * returns a real, working, WRONG credential — the request succeeds, the operator is billed by a
-   * vendor they did not choose, and nothing anywhere throws.
-   */
+describe('requirePlatformKey — a provider spends ITS OWN key', () => {
   for (const provider of PLATFORM_PROVIDERS) {
-    it(`${provider} resolves the ${EXPECTED_KEY_ENV[provider]} value and no other`, () => {
-      const key = requirePlatformKey(configWithAllKeys(provider));
+    it(`${provider} resolves the ${EXPECTED_KEY_ENV[provider]} value`, () => {
+      const config: PlatformConfig = { provider, anthropicApiKey: SENTINEL[provider], proFeaturesEnabled: false };
 
-      expect(key).toBe(SENTINEL[provider]);
-
-      for (const other of PLATFORM_PROVIDERS) {
-        if (other !== provider) {
-          expect(key, `${provider} resolved ${other}'s key`).not.toBe(SENTINEL[other]);
-        }
-      }
+      expect(requirePlatformKey(config)).toBe(SENTINEL[provider]);
+      expect(hasPlatformKey(config)).toBe(true);
     });
 
-    it(`${provider} reports its key present only when it is actually present`, () => {
-      expect(hasPlatformKey(configWithAllKeys(provider))).toBe(true);
-      expect(hasPlatformKey(configWithoutOwnKey(provider))).toBe(false);
+    it(`${provider} reports its key absent when it is absent`, () => {
+      const config: PlatformConfig = { provider, proFeaturesEnabled: false };
+
+      expect(hasPlatformKey(config)).toBe(false);
+      expect(() => requirePlatformKey(config)).toThrow(NotConfiguredError);
     });
   }
+
+  /* An empty string is not a key. Falsy is falsy on both doors, or one lies to the other. */
+  it('an empty-string key is treated as absent by BOTH doors', () => {
+    const config: PlatformConfig = { provider: 'Anthropic', anthropicApiKey: '', proFeaturesEnabled: false };
+
+    expect(hasPlatformKey(config)).toBe(false);
+    expect(() => requirePlatformKey(config)).toThrow(NotConfiguredError);
+  });
 });
 
 describe('requirePlatformKey — a missing key is a describable 503, naming the right variable', () => {
-  /*
-   * The other half of the same defect, and the one an operator actually meets: with every OTHER
-   * provider's key set, a lookup that falls through reports SUCCESS while holding the wrong
-   * credential. Credits mode never falls back to a provider picker and never falls back to another
-   * provider's key — a misconfiguration is a state to REPORT (§4.1, §1.3 principle 0).
-   */
   for (const provider of PLATFORM_PROVIDERS) {
     const ownVar = EXPECTED_KEY_ENV[provider];
 
-    it(`${provider} with only the OTHER providers' keys throws NotConfiguredError`, () => {
-      expect(() => requirePlatformKey(configWithoutOwnKey(provider))).toThrow(NotConfiguredError);
-    });
-
-    it(`${provider}'s error names ${provider} and ${ownVar}, and no other provider's variable`, () => {
+    it(`${provider}'s error names ${provider} and ${ownVar}, and no retired provider's variable`, () => {
       let message = '';
 
       try {
-        requirePlatformKey(configWithoutOwnKey(provider));
+        requirePlatformKey({ provider, proFeaturesEnabled: false });
       } catch (error) {
         message = (error as Error).message;
       }
@@ -217,54 +158,29 @@ describe('requirePlatformKey — a missing key is a describable 503, naming the 
 
       /*
        * ⚠️ The load-bearing half. An error that names the WRONG variable is worse than no error: it
-       * sends someone to set a key that changes nothing, and the symptom does not move. This is the
-       * same failure `getTierModel`'s message shipped for months while instructing operators to set
-       * RETIRED env vars — nothing tests the text of a failure path unless someone writes it down.
+       * sends someone to set a key that changes nothing, and the symptom does not move.
        */
-      for (const other of PLATFORM_PROVIDERS) {
-        if (other !== provider) {
-          expect(message, `${provider}'s error names ${EXPECTED_KEY_ENV[other]}`).not.toContain(
-            EXPECTED_KEY_ENV[other],
-          );
-        }
+      for (const retired of RETIRED_LLM_KEY_ENV) {
+        expect(message, `${provider}'s error names ${retired}`).not.toContain(retired);
       }
     });
   }
-
-  /* An empty string is not a key. Falsy is falsy on both doors, or one lies to the other. */
-  it('an empty-string key is treated as absent by BOTH doors', () => {
-    const config: PlatformConfig = {
-      provider: 'Comet',
-      cometApiKey: '',
-      proFeaturesEnabled: false,
-    };
-
-    expect(hasPlatformKey(config)).toBe(false);
-    expect(() => requirePlatformKey(config)).toThrow(NotConfiguredError);
-  });
 });
 
 describe('platformKeyEnvFor agrees with the key that actually resolves', () => {
   /*
-   * 🔴 THE DRIFT GUARD, and the reason it is driven through `getPlatformConfig` rather than asserted
-   * against a table.
+   * 🔴 THE DRIFT GUARD, driven through `getPlatformConfig` rather than asserted against a table.
    *
-   * There are two independent answers to "which key does this provider need": the NAME
-   * (`PLATFORM_KEY_ENV`, quoted in the 503 and in the health report) and the VALUE (`platformKeyFor`,
-   * which decides what gets spent). They were separate expressions — one exhaustive record, one
-   * ternary — so they could disagree, and when they did the product told the operator to set
-   * `COMET_API_KEY` and then spent `ANTHROPIC_API_KEY`. Both would have to be wrong in the same
-   * direction to pass this: it stubs ONLY the env var `platformKeyEnvFor` names, and requires the key
-   * that comes back out of `requirePlatformKey` to be the value that went in.
-   *
-   * That also pins the third link nothing else covers — that `getPlatformConfig` reads that variable
-   * into the field the lookup reads back.
+   * Two independent answers to "which key does this provider need": the NAME (`PLATFORM_KEY_ENV`,
+   * quoted in the 503 and the health report) and the VALUE (`platformKeyFor`, which decides what gets
+   * spent). This stubs ONLY the variable `platformKeyEnvFor` names and requires the key that comes back
+   * out of `requirePlatformKey` to be the value that went in — which also pins that `getPlatformConfig`
+   * reads that variable into the field the lookup reads back.
    */
   for (const provider of PLATFORM_PROVIDERS) {
     it(`${provider}: ${EXPECTED_KEY_ENV[provider]} is both the advertised variable and the spent one`, () => {
       expect(platformKeyEnvFor(provider)).toBe(EXPECTED_KEY_ENV[provider]);
 
-      vi.stubEnv('LLM_PROVIDER', provider);
       vi.stubEnv(platformKeyEnvFor(provider), SENTINEL[provider]);
 
       const config = getPlatformConfig();
@@ -273,27 +189,38 @@ describe('platformKeyEnvFor agrees with the key that actually resolves', () => {
       expect(hasPlatformKey(config)).toBe(true);
       expect(requirePlatformKey(config)).toBe(SENTINEL[provider]);
     });
+  }
 
-    it(`${provider}: with every OTHER variable set and its own unset, it is NOT configured`, () => {
-      vi.stubEnv('LLM_PROVIDER', provider);
+  /*
+   * 🔴 NEVER FALL BACK TO ANOTHER PROVIDER'S KEY. `KIE_API_KEY` is still a live variable (it buys media
+   * renders), so an Anthropic deploy routinely holds it. Borrowing it for an LLM turn would send an
+   * Anthropic request with a KIE credential — or, worse, a future fallback that "helpfully" tried the
+   * next key. Missing Anthropic key must stay NOT CONFIGURED whatever else is set.
+   */
+  it('with every retired provider key set and ANTHROPIC_API_KEY unset, it is NOT configured', () => {
+    stubRetiredKeys();
 
-      for (const other of PLATFORM_PROVIDERS) {
-        if (other !== provider) {
-          vi.stubEnv(EXPECTED_KEY_ENV[other], SENTINEL[other]);
-        }
-      }
+    const config = getPlatformConfig();
+
+    expect(config.provider).toBe('Anthropic');
+    expect(hasPlatformKey(config)).toBe(false);
+    expect(() => requirePlatformKey(config)).toThrow(NotConfiguredError);
+  });
+
+  /*
+   * A stale `LLM_PROVIDER` naming a retired gateway is IGNORED (it only warns) — the provider stays
+   * Anthropic and the key spent is Anthropic's, never the retired gateway's key sitting beside it.
+   */
+  for (const stale of ['KIE', 'Comet']) {
+    it(`LLM_PROVIDER=${stale} still spends ANTHROPIC_API_KEY, never the ${stale} key`, () => {
+      stubRetiredKeys();
+      vi.stubEnv('LLM_PROVIDER', stale);
+      vi.stubEnv('ANTHROPIC_API_KEY', SENTINEL.Anthropic);
 
       const config = getPlatformConfig();
 
-      expect(hasPlatformKey(config)).toBe(false);
-      expect(() => requirePlatformKey(config)).toThrow(NotConfiguredError);
+      expect(config.provider).toBe('Anthropic');
+      expect(requirePlatformKey(config)).toBe(SENTINEL.Anthropic);
     });
   }
-
-  /* Every provider needs a DISTINCT variable — two sharing one would make the record decorative. */
-  it('no two providers read the same env var', () => {
-    const vars = PLATFORM_PROVIDERS.map((provider) => platformKeyEnvFor(provider));
-
-    expect(new Set(vars).size).toBe(PLATFORM_PROVIDERS.length);
-  });
 });

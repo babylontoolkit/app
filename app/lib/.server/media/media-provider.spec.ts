@@ -864,9 +864,10 @@ describe('the media provider list agrees with its neighbours', () => {
       expect(platform && mediaOnly, `${provider} is declared media-only AND is a platform provider`).toBe(false);
     }
 
-    // CONTROL: the exception is real and narrow — fal, and only fal, is media-only today.
-    expect([...MEDIA_ONLY_PROVIDERS]).toEqual(['FAL']);
+    // CONTROL: since 2026-10-03 BOTH media gateways are media-only — Anthropic is the only LLM provider.
+    expect([...MEDIA_ONLY_PROVIDERS]).toEqual(['KIE', 'FAL']);
     expect(PLATFORM_PROVIDERS).not.toContain('FAL' as never);
+    expect(PLATFORM_PROVIDERS).not.toContain('KIE' as never);
 
     // Anthropic sells no renders, so the two lists must NOT be the same list.
     expect(PLATFORM_PROVIDERS).toContain('Anthropic');
@@ -889,11 +890,10 @@ describe('the media provider list agrees with its neighbours', () => {
      * ⚠️ No longer EQUAL (2026-09-29): Anthropic has a price list (for LLM rows) but sells no renders,
      * so it is the one list with no media provider — an empty `media` table, which is valid.
      *
-     * fal (T3) is a media provider with a media-only list, so it is NOT in this difference. Comet IS
-     * (2026-10-01): it keeps its LLM list and is no longer a media gateway, so its media table is empty.
+     * fal (T3) and KIE are media providers, so they are NOT in this difference. Comet's list was removed
+     * with Comet on 2026-10-03.
      */
     expect(MARKET_PRICE_PROVIDERS.filter((p) => !(MEDIA_PROVIDERS as readonly string[]).includes(p))).toEqual([
-      'Comet',
       'Anthropic',
     ]);
   });

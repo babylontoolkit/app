@@ -19,8 +19,10 @@
  *      forever, so every extractor is proven to have found real code before anything is asserted.
  *
  *   3. **The ROUTE half (T7) — and this one IS driven.** `api.agent.ts`'s `action` is exported and
- *      the only two things it needs from the world are a verified user and `runAgentGeneration`, so
- *      section 3 mocks exactly those two, POSTs a real `Request`, and reads the bytes off the
+ *      the only two things it needs from the world are a verified user and the engine — since
+ *      2026-10-03 (`_specs/anthropic-only_plan.md` D1) only `runManagedGeneration`, the legacy
+ *      `runAgentGeneration` branch is gone from the route — so section 3 mocks exactly those two,
+ *      POSTs a real `Request`, and reads the bytes off the
  *      response stream. That matters for the property the whole ladder is observed through: the
  *      `agentMeta` annotation must name the rung that RAN, never the one that was asked for — and a
  *      source scan can only see that `generation.` is spelled somewhere near it, where a live drive
@@ -64,16 +66,17 @@ import { action as agentRouteAction } from '~/routes/api.agent';
  * run. The auth mock SPREADS the original rather than replacing the module: `requireVerifiedUser` is
  * the only export the route needs, but a plain factory silently deletes `UnauthorizedError` and
  * friends for anything else that reaches this module graph later — a failure that would land on an
- * unrelated test. `runAgentGeneration` is replaced outright: the real proxy is precisely what section
- * 2 reads from disk, and loading it here would drag the whole prompt builder into a route test.
+ * unrelated test. `runManagedGeneration` — the route's ONLY engine since 2026-10-03 — is replaced
+ * outright: the real engine opens Managed Agents sessions and runs the credit gate, and loading it here
+ * would turn a test of the route's boundary into a test of the engine (it 402s with no ledger).
  */
 const routeMocks = vi.hoisted(() => ({
-  runAgentGeneration: vi.fn(),
+  runManagedGeneration: vi.fn(),
   requireVerifiedUser: vi.fn(),
 }));
 
-vi.mock('~/lib/.server/agent/proxy', () => ({
-  runAgentGeneration: routeMocks.runAgentGeneration,
+vi.mock('~/lib/.server/agent-managed/engine', () => ({
+  runManagedGeneration: routeMocks.runManagedGeneration,
 }));
 
 vi.mock('~/lib/.server/supabase/auth', async (importOriginal) => ({
@@ -163,11 +166,12 @@ describe('getTierModel — every rung resolves its OWN model, from code, with no
   });
 
   /*
-   * On BOTH providers. A rung's row is injected into every provider's table (`providerRates`), so this
-   * is normally satisfied by construction — it is asserted because the thing it would catch is a rung
-   * that resolves on the provider a developer happens to run and refuses on the one production uses.
+   * Anthropic is the only LLM gateway since 2026-10-03 (`_specs/anthropic-only_plan.md`), and a stale
+   * `LLM_PROVIDER` naming a retired one (an upgrading `.env.local`, an SSM line nobody removed) is
+   * IGNORED with a warning, never thrown on. Asserted because the thing it would catch is a rung that
+   * resolves on a clean machine and refuses on one carrying yesterday's provider setting.
    */
-  it.each(['KIE', 'Anthropic'])('resolves the paid rung on %s', (provider) => {
+  it.each(['Anthropic', 'KIE', 'Comet'])('resolves the paid rung with LLM_PROVIDER=%s', (provider) => {
     stubTierEnv({ LLM_PROVIDER: provider });
 
     expect(getTierModel('premium', {})).toBe('claude-opus-5-5');
@@ -264,84 +268,89 @@ describe('getTierModel — an unpriceable selector is refused, naming the rung�
 /**
  * 🔴 `getTierModel(id, context, providerOverride)` — AND AN HONEST ACCOUNT OF WHAT IT BUYS.
  *
- * The third argument arrived with `AUTO_MODEL_SELECT`: the gateway is chosen PER REQUEST, so a caller
- * holding `config.provider` must be able to say so rather than let this re-derive from `LLM_PROVIDER`
- * — two readers of one decision, on the most expensive rung in the product (`kieEnvModel`, exactly).
+ * The third argument arrived with `AUTO_MODEL_SELECT`, when the gateway was chosen PER REQUEST and a
+ * caller holding `config.provider` had to be able to say so. Since 2026-10-03
+ * (`_specs/anthropic-only_plan.md`) Anthropic is the ONLY LLM gateway, the override's type admits only
+ * `'Anthropic'`, and `getPlatformProvider` returns Anthropic whatever `LLM_PROVIDER` says (warning,
+ * never throwing, on a stale value).
  *
- * ⚠️ **It is NOT observable through this function's return value or its error, for any real
- * configuration, and the implementation's own comment says so.** `providerRates` gap-fills every
- * resolvable rung's model into EVERY provider's table (`rates.ts` `withTiers`, fill-never-overwrite),
- * so for an enabled rung the price lookup below succeeds on every gateway by construction; and a rung
- * that is disabled, or whose selector the Marketplace list cannot price, throws BEFORE the provider is
- * ever consulted. There is no input that makes the argument change the answer.
+ * ⚠️ **So the argument is NOT observable through this function's return value or its error.** There is
+ * one gateway; passing it and omitting it must agree, and a stale `LLM_PROVIDER` must not be able to
+ * make them disagree. This block pins exactly that:
  *
- * So this block does the only two honest things available:
- *
- *   1. It PINS THE UNOBSERVABILITY as a property. If someone makes the check bite — a per-provider
- *      ladder, a gate on native pricing — these cases fail and demand a real behavioural pin instead
- *      of leaving one to be written from memory.
+ *   1. It PINS THE UNOBSERVABILITY as a property. If a second LLM gateway ever returns and the override
+ *      starts to bite, these cases fail and demand a real behavioural pin instead of leaving one to be
+ *      written from memory.
  *   2. It reads the resolution from the source, because that is the only instrument that can see the
- *      argument being used at all. The behavioural half of the parameter — the price table it selects
- *      — is driven with a stubbed rates seam in `tier-model-provider.spec.ts`, and the proxy call site
- *      is pinned in `provider-select-wiring.spec.ts`.
+ *      argument being used at all. Which price table the rung is checked against is driven with a
+ *      stubbed rates seam in `tier-model-provider.spec.ts`.
  */
 describe('getTierModel — the provider override, and what it can and cannot be observed to do', () => {
-  it.each(['Anthropic', 'KIE', 'Comet'] as const)('accepts an explicit %s and resolves the rung', (provider) => {
+  it('accepts an explicit Anthropic and resolves the rung', () => {
     stubTierEnv();
 
-    expect(getTierModel('premium', {}, provider)).toBe('claude-opus-5-5');
+    expect(getTierModel('premium', {}, 'Anthropic')).toBe('claude-opus-5-5');
   });
 
   /*
-   * THE PROPERTY, stated directly: an enabled rung resolves identically on every gateway, INCLUDING a
-   * gateway that does not price the model natively. That is `withTiers`' gap-fill, and it is why the
-   * argument cannot be caught by a behavioural test here. `claude-fable-5` is the live example — the
-   * owner's deploy runs it, and Anthropic bakes no row for it.
+   * A selector Anthropic's list prices resolves through the override exactly as without it.
+   * `claude-fable-5` is a non-default selector Anthropic sells ($10/$50), so this exercises the
+   * operator-chosen path rather than the baked default.
    */
-  it('resolves the same model on every gateway, even one with no native row for it', () => {
+  it('resolves a configured selector identically with and without the override', () => {
     stubTierEnv({ PREMIUM_MODEL: 'claude-fable-5' });
 
-    const answers = (['Anthropic', 'KIE', 'Comet'] as const).map((provider) => getTierModel('premium', {}, provider));
-
-    expect(answers).toEqual(['claude-fable-5', 'claude-fable-5', 'claude-fable-5']);
+    expect(getTierModel('premium', {}, 'Anthropic')).toBe('claude-fable-5');
+    expect(getTierModel('premium', {})).toBe('claude-fable-5');
   });
 
   /*
    * ⚠️ If this ever fails, the override has become observable and the comment above is out of date.
-   * Write the real behavioural pin then — do not relax this into `toBeDefined()`.
+   * Write the real behavioural pin then — do not relax this into `toBeDefined()`. The stale
+   * `LLM_PROVIDER` is the input that WOULD make them differ if the fallback still honoured it.
    */
-  it('the override cannot change the answer while the rung is gap-filled into every table', () => {
-    stubTierEnv({ LLM_PROVIDER: 'Anthropic', PREMIUM_MODEL: 'claude-fable-5' });
+  it('a stale LLM_PROVIDER cannot make the fallback disagree with the explicit Anthropic override', () => {
+    for (const stale of ['KIE', 'Comet']) {
+      stubTierEnv({ LLM_PROVIDER: stale, PREMIUM_MODEL: 'claude-fable-5' });
 
-    expect(getTierModel('premium', {})).toBe(getTierModel('premium', {}, 'Comet'));
-    expect(getTierModel('premium', {})).toBe(getTierModel('premium', {}, 'KIE'));
-  });
-
-  /* Omitting the argument must behave exactly as it did before the parameter existed. */
-  it('falls back to LLM_PROVIDER when no override is given', () => {
-    stubTierEnv({ LLM_PROVIDER: 'KIE' });
-
-    expect(getTierModel('premium', {})).toBe(getTierModel('premium', {}, 'KIE'));
-  });
-
-  /*
-   * The walls run BEFORE the provider is consulted, which is the other half of why no override can be
-   * observed: a withdrawn rung refuses whoever asks, and the refusal names the FLAG rather than a
-   * price list, because that is the one thing the operator has to change.
-   */
-  it('a withdrawn rung refuses on every gateway, naming the flag and not the provider', () => {
-    stubTierEnv({ ENABLE_PREMIUM_MODEL: 'false' });
-
-    for (const provider of ['Anthropic', 'KIE', 'Comet'] as const) {
-      expect(() => getTierModel('premium', {}, provider)).toThrow(NotConfiguredError);
-      expect(() => getTierModel('premium', {}, provider)).toThrow(/ENABLE_PREMIUM_MODEL/);
+      expect(getTierModel('premium', {})).toBe(getTierModel('premium', {}, 'Anthropic'));
+      expect(getTierModel('premium', {})).toBe('claude-fable-5');
     }
   });
 
+  /* Omitting the argument behaves exactly as passing the only gateway there is. */
+  it('falls back to the platform provider (Anthropic) when no override is given', () => {
+    stubTierEnv();
+
+    expect(getTierModel('premium', {})).toBe(getTierModel('premium', {}, 'Anthropic'));
+  });
+
   /*
-   * SOURCE. `providerOverride ?? getPlatformProvider(context)` is a five-character deletion that no
-   * assertion above can see, and it silently returns the money path to validating the rung against
-   * `LLM_PROVIDER` while a different gateway serves and bills it.
+   * The walls run BEFORE the provider is consulted: a withdrawn rung refuses whoever asks, and the
+   * refusal names the FLAG rather than a price list, because that is the one thing the operator has to
+   * change. Asserted with and without the override, and with a stale `LLM_PROVIDER`.
+   */
+  it('a withdrawn rung refuses, naming the flag and not the provider', () => {
+    for (const vars of [{ ENABLE_PREMIUM_MODEL: 'false' }, { ENABLE_PREMIUM_MODEL: 'false', LLM_PROVIDER: 'KIE' }]) {
+      stubTierEnv(vars);
+
+      expect(() => getTierModel('premium', {}, 'Anthropic')).toThrow(NotConfiguredError);
+      expect(() => getTierModel('premium', {}, 'Anthropic')).toThrow(/ENABLE_PREMIUM_MODEL/);
+      expect(() => getTierModel('premium', {})).toThrow(/ENABLE_PREMIUM_MODEL/);
+    }
+  });
+
+  /* CONTROL for the case above — with the flag on, the same environment resolves. */
+  it('CONTROL — the same environment with the rung enabled resolves', () => {
+    stubTierEnv({ LLM_PROVIDER: 'KIE' });
+
+    expect(getTierModel('premium', {}, 'Anthropic')).toBe('claude-opus-5-5');
+  });
+
+  /*
+   * SOURCE. `providerOverride ?? getPlatformProvider(context)` is the only place the argument is used,
+   * and no assertion above can see it — with one gateway, every resolution agrees. Pinned so a second
+   * gateway cannot return without the override being honoured on the money path.
    */
   it('resolves the provider from the override, falling back to getPlatformProvider', () => {
     const body = configSource.slice(
@@ -774,13 +783,6 @@ function fakeGeneration(overrides: Partial<AgentGeneration> = {}): AgentGenerati
 
 /** POST a body at the real route and read the whole data stream back as text. */
 async function postToAgentRoute(body: Record<string, unknown>): Promise<string> {
-  /*
-   * This spec measures the LEGACY proxy's tier boundary (`runAgentGeneration` is the mock above). Since T12
-   * the deploy default is `managed`, so an unpinned drive would take the managed engine instead — pin the
-   * kill switch so the route reaches the door this spec is about.
-   */
-  vi.stubEnv('AGENT_ENGINE', 'legacy');
-
   const response = await (
     agentRouteAction as unknown as (args: {
       request: Request;
@@ -831,32 +833,32 @@ function agentMetaFromStream(wire: string): Record<string, unknown> {
 describe('the route hands the ladder its inputs and reports the rung that RAN', () => {
   beforeEach(() => {
     routeMocks.requireVerifiedUser.mockReset();
-    routeMocks.runAgentGeneration.mockReset();
+    routeMocks.runManagedGeneration.mockReset();
     routeMocks.requireVerifiedUser.mockResolvedValue({ id: 'user_1', email: 'dev@example.com' });
-    routeMocks.runAgentGeneration.mockResolvedValue(fakeGeneration());
+    routeMocks.runManagedGeneration.mockResolvedValue(fakeGeneration());
   });
 
-  /** What `runAgentGeneration` was actually called with. */
-  const proxyCall = () => routeMocks.runAgentGeneration.mock.calls[0][0] as Record<string, unknown>;
+  /** What `runManagedGeneration` was actually called with. */
+  const engineCall = () => routeMocks.runManagedGeneration.mock.calls[0][0] as Record<string, unknown>;
 
-  it('CONTROL — the drive reaches the proxy at all, with the request it was given', async () => {
+  it('CONTROL — the drive reaches the engine at all, with the request it was given', async () => {
     await postToAgentRoute({ chatId: 'c1' });
 
     expect(routeMocks.requireVerifiedUser).toHaveBeenCalledTimes(1);
-    expect(routeMocks.runAgentGeneration).toHaveBeenCalledTimes(1);
-    expect(proxyCall().chatId).toBe('c1');
-    expect(proxyCall().messages).toHaveLength(1);
+    expect(routeMocks.runManagedGeneration).toHaveBeenCalledTimes(1);
+    expect(engineCall().chatId).toBe('c1');
+    expect(engineCall().messages).toHaveLength(1);
   });
 
   /*
    * 🔴 The rung the user picked has to SURVIVE the boundary. Drop this one line and every request is
    * a standard request: the picker still renders, the pill still says SuperMax, the ladder in the
-   * proxy still works perfectly — and nobody is ever served anything but the free rung, with nothing
+   * decision still works perfectly — and nobody is ever served anything but the free rung, with nothing
    * throwing and the bill going DOWN, which reads as a cheaper turn rather than a broken feature.
    */
-  it('forwards the requested tier to the proxy, intact', async () => {
+  it('forwards the requested tier to the engine, intact', async () => {
     await postToAgentRoute({ tier: 'supermax' });
-    expect(proxyCall().tier).toBe('supermax');
+    expect(engineCall().tier).toBe('supermax');
   });
 
   /*
@@ -865,27 +867,27 @@ describe('the route hands the ladder its inputs and reports the rung that RAN', 
    */
   it('forwards an unrecognised tier verbatim rather than sanitising it at the boundary', async () => {
     await postToAgentRoute({ tier: 'ultramax' });
-    expect(proxyCall().tier).toBe('ultramax');
+    expect(engineCall().tier).toBe('ultramax');
   });
 
   /*
-   * 🔴 THE LEGACY ALIAS IS LOAD-BEARING AND ITS REMOVAL IS SILENT. A browser holding the previous
-   * bundle keeps posting `premium: true` across a deploy; drop the forward and that user is served
-   * the standard model with nothing anywhere saying so. `proxy.ts`'s half of this is pinned above —
-   * this is the half that would let a future "remove the dead boolean" cleanup pass every test.
+   * The deprecated `premium: true` alias (a stale bundle that sends no `tier`) is translated at the route
+   * — the only route to an engine since 2026-10-03 — so that user's Premium preference is still a REQUEST
+   * (`decideModelTier` re-derives it). A client that sends both has its `tier` forwarded untouched.
    */
-  it('still forwards the deprecated premium boolean', async () => {
+  it("translates a stale bundle's premium: true (no tier) into a Premium request", async () => {
     await postToAgentRoute({ premium: true });
 
-    expect(proxyCall().premium).toBe(true);
-    expect(proxyCall().tier).toBeUndefined();
+    expect(engineCall().tier).toBe('premium');
   });
 
-  it('forwards both when a client mid-upgrade sends both, and lets the proxy pick', async () => {
-    await postToAgentRoute({ tier: 'supermax', premium: true });
+  it('CONTROL: premium false or absent requests nothing, and an explicit tier always wins', async () => {
+    await postToAgentRoute({ premium: false });
+    expect(engineCall().tier).toBeUndefined();
 
-    expect(proxyCall().tier).toBe('supermax');
-    expect(proxyCall().premium).toBe(true);
+    routeMocks.runManagedGeneration.mockClear();
+    await postToAgentRoute({ tier: 'supermax', premium: true });
+    expect(engineCall().tier).toBe('supermax');
   });
 
   /*
@@ -912,7 +914,7 @@ describe('the route hands the ladder its inputs and reports the rung that RAN', 
    * that hardcodes `standard` — the pair is what makes either one mean something.
    */
   it('CONTROL — a granted rung is reported as itself', async () => {
-    routeMocks.runAgentGeneration.mockResolvedValue(
+    routeMocks.runManagedGeneration.mockResolvedValue(
       fakeGeneration({ tier: 'premium', tierReason: 'sufficient_credits', model: 'claude-fable-5' }),
     );
 
@@ -924,11 +926,11 @@ describe('the route hands the ladder its inputs and reports the rung that RAN', 
   });
 
   /*
-   * The legacy path must be observable too: a `premium: true` client that gets declined has to be
-   * able to tell, and it has no `tier` of its own to compare against.
+   * A stale `premium: true` client must be told what ran too — it has no `tier` of its own to compare
+   * against, so the annotation is its only signal.
    */
   it('reports the rung on a legacy premium request as well', async () => {
-    routeMocks.runAgentGeneration.mockResolvedValue(
+    routeMocks.runManagedGeneration.mockResolvedValue(
       fakeGeneration({ tier: 'premium', tierReason: 'sufficient_credits', model: 'claude-opus-5' }),
     );
 
@@ -963,7 +965,7 @@ describe('the route hands the ladder its inputs and reports the rung that RAN', 
   it('puts the declined-tier notice on the credits annotation', async () => {
     const notice = 'The SuperMax model needs at least 1,500 credits — this build used the standard model.';
 
-    routeMocks.runAgentGeneration.mockResolvedValue(fakeGeneration({ notice }));
+    routeMocks.runManagedGeneration.mockResolvedValue(fakeGeneration({ notice }));
 
     const credits = annotationFromStream(await postToAgentRoute({ tier: 'supermax' }), 'credits');
 
@@ -975,7 +977,7 @@ describe('the route hands the ladder its inputs and reports the rung that RAN', 
    * carry `null`, or the assertion above would pass against a route that hardcodes a string.
    */
   it('CONTROL — a turn with nothing to say carries a null notice', async () => {
-    routeMocks.runAgentGeneration.mockResolvedValue(
+    routeMocks.runManagedGeneration.mockResolvedValue(
       fakeGeneration({ tier: 'premium', tierReason: 'sufficient_credits' }),
     );
 
@@ -986,7 +988,7 @@ describe('the route hands the ladder its inputs and reports the rung that RAN', 
 
   /* The settled numbers still ride the same annotation — the notice must not have displaced them. */
   it('keeps the settled credit numbers alongside the notice', async () => {
-    routeMocks.runAgentGeneration.mockResolvedValue(
+    routeMocks.runManagedGeneration.mockResolvedValue(
       fakeGeneration({
         notice: 'declined',
         settlement: Promise.resolve({ creditsCharged: 42, balanceAfter: 958, savings: null }),
@@ -1074,7 +1076,7 @@ describe('CONTROLS — the route scan can still see the code it judges', () => {
   });
 
   it('extracts real, non-empty regions for every scan below', () => {
-    expect(callArgs(route, 'runAgentGeneration')).toContain('messages:');
+    expect(callArgs(route, 'runManagedGeneration')).toContain('messages:');
     expect(annotationValue(annotations, 'agentMeta')).toContain('generationId:');
     expect(route).toMatch(/buildTurnAnnotations\(generation,/);
   });
@@ -1107,19 +1109,18 @@ describe('the request body accepts an UNTRUSTED tier, and keeps the legacy alias
     expect(route).not.toContain("'standard' | 'premium'");
   });
 
-  /* The deprecated alias is still part of the accepted shape — dropping the field drops the alias. */
+  /* The deprecated alias is still part of the accepted SHAPE (a stale bundle's body must still parse). */
   it('still declares the deprecated premium boolean', () => {
     expect(route).toMatch(/\bpremium\?:\s*boolean;/);
   });
 });
 
 describe('the forward and the annotation read from the right side of the ladder', () => {
-  const forwarded = callArgs(route, 'runAgentGeneration');
+  const forwarded = callArgs(route, 'runManagedGeneration');
   const meta = annotationValue(annotations, 'agentMeta');
 
-  it('forwards both the tier and the legacy boolean, from the body', () => {
+  it('forwards the tier from the body, verbatim', () => {
     expect(forwarded).toMatch(/tier:\s*body\.tier\b/);
-    expect(forwarded).toMatch(/premium:\s*body\.premium\b/);
   });
 
   /*

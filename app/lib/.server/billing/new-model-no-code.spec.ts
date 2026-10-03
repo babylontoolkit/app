@@ -126,14 +126,14 @@ describe('1. Anthropic prices come from a promotable list', () => {
   });
 });
 
-describe('2. a paid rung may be priced by ANY provider’s list', () => {
+describe('2. a paid rung is priced by Anthropic’s list', () => {
   it('accepts PLATINUM_MODEL=claude-fable-5-1, which KIE does not sell', () => {
     stubEnv({ PLATINUM_MODEL: 'claude-fable-5-1' });
 
     const tier = getModelTier('platinum', {});
     expect(tier.model).toBe('claude-fable-5-1');
 
-    // The gap-fill price is the MOST EXPENSIVE list's (Anthropic $10/$50 over Comet $8/$40).
+    // Priced from Anthropic's list, the only LLM list since 2026-10-03.
     expect(tier.rates.outputPerMTok).toBe(50);
   });
 
@@ -148,31 +148,20 @@ describe('2. a paid rung may be priced by ANY provider’s list', () => {
   });
 });
 
-describe('3. a paid turn is routed to a gateway that SELLS its model', () => {
+describe('3. there is one gateway — a paid turn cannot be routed anywhere but Anthropic (2026-10-03)', () => {
+  /* The multi-gateway ladder is dormant: whatever the chain says, every turn resolves to Anthropic. */
   const chain = {
     AUTO_MODEL_SELECT: 'true',
     LLM_PROVIDER: 'KIE',
     LLM_PROVIDER_CHAIN: 'KIE,Comet,Anthropic',
-    KIE_API_KEY: 'k',
-    COMET_API_KEY: 'c',
     ANTHROPIC_API_KEY: 'a',
     LLM_MODEL: 'claude-opus-5-5',
     PLATINUM_MODEL: 'claude-fable-5-1',
   } as const;
 
-  it('keeps a Standard turn on the head of the chain', () => {
+  it.each([undefined, 'claude-fable-5-1', 'claude-nobody-sells-this'])('rung model %s → Anthropic', (rung) => {
     stubEnv(chain);
-    expect(resolvePlatformProvider({}, 0)).toBe('KIE');
-  });
-
-  it('moves a Platinum turn past KIE, which does not sell Fable 5.1', () => {
-    stubEnv(chain);
-    expect(resolvePlatformProvider({}, 0, 'claude-fable-5-1')).toBe('Comet');
-  });
-
-  it('falls back to the standard gate when NO gateway sells the rung’s model', () => {
-    stubEnv(chain);
-    expect(resolvePlatformProvider({}, 0, 'claude-nobody-sells-this')).toBe('KIE');
+    expect(resolvePlatformProvider({}, 0, rung)).toBe('Anthropic');
   });
 });
 

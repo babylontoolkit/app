@@ -2,7 +2,7 @@
  * fal.ai's baked price list — the static fallback beneath the operator's promoted list (SPEC §4.6,
  * `_specs/media-gateways_plan.md` T2).
  *
- * The same role `baked-market-prices.ts` (KIE) and `baked-comet-prices.ts` play: real,
+ * The same role `baked-market-prices.ts` (KIE) plays: real,
  * current-at-build pricing, so a storage outage costs price DRIFT since the last bake and never a
  * dead billing path or a zero rate. The operator's promoted list (Settings → Admin → Marketplace
  * prices → FAL) overrides it at runtime.

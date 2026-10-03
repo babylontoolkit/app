@@ -30,12 +30,11 @@ import {
 } from './model-tiers';
 import { getModelTier, getModelTiers, getPremiumTier } from './rates';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
-import { BAKED_COMET_PRICES } from './baked-comet-prices';
 import { BAKED_ANTHROPIC_PRICES } from './baked-anthropic-prices';
 import { ENV_EXAMPLE_FILENAME, envExampleAssignments, envExampleValue } from './env-example';
 import { validateMarketPriceList } from './market-prices';
 import { invalidateMarketPricesCache, promoteMarketPrices } from './market-price-store';
-import { KIE_MODELS } from '~/lib/modules/llm/providers/kie-wire';
+import AnthropicProvider from '~/lib/modules/llm/providers/anthropic';
 import { DEFAULT_MODEL } from '~/utils/constants';
 import type { ObjectStore } from '~/lib/.server/storage';
 
@@ -153,15 +152,12 @@ describe('the ladder table (model-tiers.ts)', () => {
    * "model and price are one fact" rule applied to the fallbacks rather than to the selectors.
    */
   /*
-   * In SOME baked list, not necessarily KIE's (2026-09-29): a rung is accepted if any provider's list
-   * prices its model, and Platinum's default (Fable 5.1) is sold by Comet and Anthropic but not KIE.
+   * In ANTHROPIC's baked list specifically (2026-10-03, `_specs/anthropic-only_plan.md` D4): a rung is
+   * priced from Anthropic's list alone, so a default only KIE's list carries is dead on arrival.
    */
-  it('prices every default model in at least one baked list', () => {
+  it("prices every default model in Anthropic's baked list", () => {
     for (const definition of PAID_MODEL_TIERS) {
-      const priced = [BAKED_MARKET_PRICES, BAKED_COMET_PRICES, BAKED_ANTHROPIC_PRICES].some(
-        (list) => list.llm[definition.defaultModel],
-      );
-      expect(priced, `${definition.id} default model`).toBe(true);
+      expect(BAKED_ANTHROPIC_PRICES.llm[definition.defaultModel], `${definition.id} default model`).toBeDefined();
     }
   });
 
@@ -246,12 +242,19 @@ describe('the ladder is coherent (Standard · Premium defaults)', () => {
     expect(new Set(models).size, `collision in ${JSON.stringify(models)}`).toBe(models.length);
   });
 
-  it.each(ladder)('prices the $rung rung ($model) in the baked list', ({ model }) => {
-    expect(BAKED_MARKET_PRICES.llm[model]).toBeDefined();
+  /* Anthropic is the only LLM gateway since 2026-10-03, so its list is the one every rung must be in. */
+  it.each(ladder)("prices the $rung rung ($model) in Anthropic's baked list", ({ model }) => {
+    expect(BAKED_ANTHROPIC_PRICES.llm[model]).toBeDefined();
   });
 
   /* The fallback list must never be refused by the validator every promotion passes through. */
-  it('leaves the baked list valid — it prices every rung AND passes its own validator', () => {
+  it('leaves the baked Anthropic list valid — it prices every rung AND passes its own validator', () => {
+    const result = validateMarketPriceList(BAKED_ANTHROPIC_PRICES, 'Anthropic');
+    expect(result.ok, result.ok ? '' : result.errors.join('; ')).toBe(true);
+  });
+
+  /* KIE's baked list still has to validate — it prices MEDIA, and its store format is unchanged. */
+  it('leaves the baked KIE list valid too', () => {
     const result = validateMarketPriceList(BAKED_MARKET_PRICES, 'KIE');
     expect(result.ok, result.ok ? '' : result.errors.join('; ')).toBe(true);
   });
@@ -260,13 +263,13 @@ describe('the ladder is coherent (Standard · Premium defaults)', () => {
    * 🔴 PRICED IS NOT ENOUGH — the rung must be LISTED. See the module doc above: an unlisted default
    * silently runs `modelsList[0]` on the enhancer path while settlement charges the configured rates.
    */
-  it.each(ladder)('lists the $rung rung ($model) in KIE_MODELS, not merely prices it', ({ model }) => {
-    expect(KIE_MODELS.map((entry) => entry.name)).toContain(model);
+  it.each(ladder)('lists the $rung rung ($model) in the Anthropic provider, not merely prices it', ({ model }) => {
+    expect(new AnthropicProvider().staticModels.map((entry) => entry.name)).toContain(model);
   });
 
   /* Monotonic PRICE, the sibling of the monotonic-threshold pin above: paying more must buy more. */
   it('keeps the baked prices non-decreasing up the ladder', () => {
-    const rows = ladder.map(({ model }) => BAKED_MARKET_PRICES.llm[model]);
+    const rows = ladder.map(({ model }) => BAKED_ANTHROPIC_PRICES.llm[model]);
 
     expect(rows.map((row) => row.inputPerMTok)).toEqual([...rows.map((row) => row.inputPerMTok)].sort((a, b) => a - b));
     expect(rows.map((row) => row.outputPerMTok)).toEqual(
@@ -283,11 +286,10 @@ describe('the ladder is coherent (Standard · Premium defaults)', () => {
  */
 describe('getModelTier — resolving a paid rung with no environment at all', () => {
   /*
-   * The rung's `rates` are the MOST EXPENSIVE baked row across the lists (2026-09-29) — they are only
-   * ever a gap-fill for a provider that does not sell the model, and a gap-fill errs towards over-
-   * charging ourselves. For Opus 5.5 that is Anthropic's $4/$20 (KIE $1.60/$8, Comet $3.20/$16).
+   * The rung's `rates` come from Anthropic's baked list — the only list that prices an LLM turn since
+   * 2026-10-03. For Opus 5.5 that is $4/$20 (KIE's list still carries a $1.60/$8 row that prices nothing).
    */
-  it('defaults Premium to Opus 5.5 at the most expensive baked price with a 1200-credit minimum', () => {
+  it("defaults Premium to Opus 5.5 at Anthropic's baked price with a 1200-credit minimum", () => {
     stubTierEnv();
 
     const tier = getModelTier('premium', {});
@@ -329,8 +331,11 @@ describe('getModelTier — the environment as SELECTOR, never as price', () => {
 
     const tier = getModelTier('premium', {});
 
-    // The most expensive list that prices it — Anthropic's $2/$10 over Comet's $1.60/$8 and KIE's $0.85.
+    // Anthropic's $2/$10 — never KIE's $0.85 row, which prices nothing since 2026-10-03.
     const baked = BAKED_ANTHROPIC_PRICES.llm['claude-sonnet-5'];
+    expect(BAKED_MARKET_PRICES.llm['claude-sonnet-5'].inputPerMTok, 'control: the lists disagree').not.toBe(
+      baked.inputPerMTok,
+    );
 
     expect(tier.model).toBe('claude-sonnet-5');
     expect(tier.minimumCredits).toBe(3000);
@@ -350,13 +355,31 @@ describe('getModelTier — the environment as SELECTOR, never as price', () => {
   });
 
   /*
-   * The admin-promoted list is the authority — this is the path an operator actually reprices through.
-   *
-   * ⚠️ Since 2026-09-29 `getModelTier` reads EVERY list and takes the most expensive row, so the
-   * promoted price must be ABOVE every baked row for the model (7 > Anthropic's $4) or the assertions
-   * below would read a different list's row — a green-looking test grading a promotion nothing used.
+   * The admin-promoted ANTHROPIC list is the authority — this is the path an operator actually reprices
+   * through. The promoted price is deliberately BELOW the baked $4 as well as different from it: under
+   * the retired "dearest row across every list wins" rule a cheaper promotion would have been ignored,
+   * so this also proves no other list is still being consulted.
    */
-  it('prices a rung from a PROMOTED list when one is live', async () => {
+  it('prices a rung from a PROMOTED Anthropic list when one is live', async () => {
+    stubTierEnv();
+
+    const result = await promoteMarketPrices(memoryStore(), 'Anthropic', {
+      ...BAKED_ANTHROPIC_PRICES,
+      llm: { ...BAKED_ANTHROPIC_PRICES.llm, [DEFAULT_PREMIUM_MODEL]: { inputPerMTok: 3, outputPerMTok: 15 } },
+    });
+    expect(result.ok).toBe(true);
+
+    const tier = getModelTier('premium', {});
+    expect(tier.rates.inputPerMTok).toBe(3);
+    expect(tier.rates.outputPerMTok).toBe(15);
+    expect(tier.rates.cacheWritePerMTok, 'cache re-derives from the promoted base').toBeCloseTo(6, 9);
+  });
+
+  /*
+   * 🔴 A PROMOTED KIE list must not move a rung (2026-10-03): KIE's `llm` rows price nothing. Before the
+   * change the dearest row across every list won, so this exact promotion repriced Premium to $7.
+   */
+  it('ignores a PROMOTED KIE llm row', async () => {
     stubTierEnv();
 
     const result = await promoteMarketPrices(memoryStore(), 'KIE', {
@@ -366,9 +389,8 @@ describe('getModelTier — the environment as SELECTOR, never as price', () => {
     expect(result.ok).toBe(true);
 
     const tier = getModelTier('premium', {});
-    expect(tier.rates.inputPerMTok).toBe(7);
-    expect(tier.rates.outputPerMTok).toBe(35);
-    expect(tier.rates.cacheWritePerMTok, 'cache re-derives from the promoted base').toBeCloseTo(14, 9);
+    expect(tier.rates.inputPerMTok).toBe(BAKED_ANTHROPIC_PRICES.llm[DEFAULT_PREMIUM_MODEL].inputPerMTok);
+    expect(tier.rates.inputPerMTok).not.toBe(7);
   });
 });
 
@@ -573,11 +595,12 @@ describe('getModelTiers — the whole ladder, never throwing', () => {
 });
 
 /**
- * 🔴 PRICED AND LISTED ARE ONE FACT (2026-07-31).
+ * 🔴 PRICED AND LISTED ARE ONE FACT (2026-07-31; re-pointed at Anthropic 2026-10-03, when KIE stopped
+ * being an LLM gateway — `_specs/anthropic-only_plan.md`).
  *
- * Two tables describe every Claude model the platform can run on KIE, and they are edited in different
- * files for different reasons: `BAKED_MARKET_PRICES.llm` says what a model COSTS, `KIE_MODELS` says the
- * provider registry KNOWS it. Either one alone is a silent failure, and they are not symmetrical:
+ * Two tables describe every Claude model the platform can run, and they are edited in different files
+ * for different reasons: `BAKED_ANTHROPIC_PRICES.llm` says what a model COSTS, the Anthropic provider's
+ * `staticModels` says the provider registry KNOWS it. Either one alone is a silent failure, and they are not symmetrical:
  *
  *  - **listed but unpriced** fails LOUDLY — `getPlatformModel` refuses the selector at config time, so
  *    the operator finds out before a single generation runs;
@@ -591,8 +614,8 @@ describe('getModelTiers — the whole ladder, never throwing', () => {
  * every generation was refused). Both directions are pinned here so the two tables cannot drift.
  */
 describe('the price list and the provider model list agree', () => {
-  const priced = Object.keys(BAKED_MARKET_PRICES.llm);
-  const listed = KIE_MODELS.map((model) => model.name);
+  const priced = Object.keys(BAKED_ANTHROPIC_PRICES.llm);
+  const listed = new AnthropicProvider().staticModels.map((model) => model.name);
 
   it.each(priced)('%s is priced, so it must also be LISTED (else the enhancer runs modelsList[0])', (model) => {
     expect(listed).toContain(model);
@@ -608,8 +631,8 @@ describe('the price list and the provider model list agree', () => {
    * bill of health forever — the scanner-that-matches-nothing failure this repo has hit before.
    */
   it('read both tables (control for the assertions above)', () => {
-    expect(priced.length).toBeGreaterThanOrEqual(10);
-    expect(listed.length).toBeGreaterThanOrEqual(10);
+    expect(priced.length).toBeGreaterThanOrEqual(5);
+    expect(listed.length).toBeGreaterThanOrEqual(5);
   });
 });
 
@@ -645,20 +668,16 @@ describe('.env.example ships a working model tier ladder', () => {
   /**
    * Every key that decides which model runs and what it costs.
    *
-   * ⚠️ `LLM_PROVIDER` is here even though it names no rung, and it earned its place: the file shipped a
-   * commented `# LLM_PROVIDER=Anthropic` sitting two lines below a paragraph explaining why a commented
-   * assignment is a footgun. Uncommenting it made the LATER line win over the real assignment at the top
-   * — silently spending a different vendor's key at a different price, which the file's own coupling note
-   * says drops grant headroom from 3.90x to 1.56x. A rule that only covers the keys someone remembered is
-   * how the next one gets through.
+   * ⚠️ `LLM_PROVIDER` used to be here: the file once shipped a commented `# LLM_PROVIDER=Anthropic` two
+   * lines below a paragraph explaining why a commented assignment is a footgun. Since 2026-10-03 it
+   * selects nothing (Anthropic is the only LLM path and a non-Anthropic value is ignored with a warning),
+   * so it moved to `IGNORED_PROVIDER_KEYS` below, which pins that the example assigns it NOWHERE — an
+   * operator reading `LLM_PROVIDER=KIE` would reasonably believe it does something.
    */
-  const LADDER_KEYS = [
-    'LLM_PROVIDER',
-    'LLM_MODEL',
-    'ENABLE_EXTENDED_MODELS',
-    'PREMIUM_MODEL',
-    'PREMIUM_MINIMUM_CREDITS',
-  ] as const;
+  const LADDER_KEYS = ['LLM_MODEL', 'ENABLE_EXTENDED_MODELS', 'PREMIUM_MODEL', 'PREMIUM_MINIMUM_CREDITS'] as const;
+
+  /** Settings the platform IGNORES since 2026-10-03 (`_specs/anthropic-only_plan.md` D1/D3). */
+  const IGNORED_PROVIDER_KEYS = ['LLM_PROVIDER', 'LLM_PROVIDER_CHAIN', 'AUTO_MODEL_SELECT', 'AGENT_ENGINE'] as const;
 
   /**
    * The CONTROL for every count assertion below. `envExampleAssignments` is a regex over lines: if it
@@ -696,6 +715,15 @@ describe('.env.example ships a working model tier ladder', () => {
   });
 
   /*
+   * An ignored setting assigned in the example (even commented) reads as a live switch. The duplicate
+   * counter's own control above proves an empty answer here is a real absence, not a dead scanner.
+   */
+  it.each(IGNORED_PROVIDER_KEYS)('never assigns the ignored %s (commented assignments count)', (key) => {
+    expect(envExampleAssignments(example, key)).toEqual([]);
+    expect(envExampleAssignments(`# ${key}=KIE`, key), 'control: the counter catches it').toHaveLength(1);
+  });
+
+  /*
    * The literal shipping ladder. These are the values an operator gets by copying the file, so they are
    * pinned rather than derived: the in-code defaults deliberately DIFFER (Premium's fallback minimum is
    * 1200 while the file ships 1500), and a test that derived from the constants would silently accept
@@ -724,7 +752,10 @@ describe('.env.example ships a working model tier ladder', () => {
     const model = envExampleValue(example, key);
 
     expect(model, `${key} is not assigned exactly once`).toBeDefined();
-    expect(BAKED_MARKET_PRICES.llm[model as string], `${key}=${model} has no baked price row`).toBeDefined();
+    expect(
+      BAKED_ANTHROPIC_PRICES.llm[model as string],
+      `${key}=${model} has no baked Anthropic price row`,
+    ).toBeDefined();
   });
 
   /*

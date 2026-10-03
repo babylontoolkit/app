@@ -5,8 +5,9 @@
  *
  * The platform prefers the CHEAPEST gateway that can actually serve the request, because credits are
  * cost-proportional (`credits = ceil(raw_usd / CREDIT_UNIT_COST_USD * CREDIT_MARGIN)`): a discount on
- * the wire is not margin, it is the user's pack stretching further. The owner's order is KIE (best
- * rates) → Comet (a smaller discount) → Anthropic (full price, last resort). KIE outages are what
+ * the wire is not margin, it is the user's pack stretching further. The owner's order WAS KIE (best
+ * rates) → Anthropic (full price, last resort) — dormant since 2026-10-03, when Anthropic became the only
+ * LLM provider (`_specs/anthropic-only_plan.md`). KIE outages are what
  * made a fixed `LLM_PROVIDER` painful — a dead gateway meant editing config and redeploying.
  *
  * ## Two rules that keep it off the money path's toes

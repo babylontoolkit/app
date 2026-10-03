@@ -24,9 +24,8 @@ import { createScopedLogger } from '~/utils/logger';
 import type { ObjectStore } from '~/lib/.server/storage';
 import { getObjectStore } from '~/lib/.server/storage';
 import type { MarketPriceList } from './market-prices';
-import { isMediaOnlyPriceProvider, validateMarketPriceList } from './market-prices';
+import { validateMarketPriceList } from './market-prices';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
-import { BAKED_COMET_PRICES } from './baked-comet-prices';
 import { BAKED_ANTHROPIC_PRICES } from './baked-anthropic-prices';
 import { BAKED_FAL_PRICES } from './baked-fal-prices';
 
@@ -53,7 +52,12 @@ const logger = createScopedLogger('market-price-store');
  * (`MEDIA_ONLY_PRICE_PROVIDERS`). The equality above therefore holds for `LLM_PRICE_PROVIDERS`, not
  * for this list — `billing.spec.ts` asserts it there.
  */
-export const MARKET_PRICE_PROVIDERS = ['KIE', 'Comet', 'Anthropic', 'FAL'] as const;
+/*
+ * 🔴 2026-10-03 (owner, `_specs/anthropic-only_plan.md` D4/D5): `Comet` removed; KIE and FAL price MEDIA
+ * only, Anthropic prices every LLM turn. KIE's list still carries `llm` rows (its store format is unchanged
+ * so promoted versions stay readable) but they price nothing — `LLM_PRICE_PROVIDERS` below is Anthropic.
+ */
+export const MARKET_PRICE_PROVIDERS = ['KIE', 'Anthropic', 'FAL'] as const;
 export type MarketPriceProvider = (typeof MARKET_PRICE_PROVIDERS)[number];
 
 /**
@@ -64,9 +68,7 @@ export type MarketPriceProvider = (typeof MARKET_PRICE_PROVIDERS)[number];
  * gateway in an LLM ladder is a category error waiting for its first row; keeping it out by
  * construction means nothing on the LLM path can ever treat fal as a place a turn is priced.
  */
-export const LLM_PRICE_PROVIDERS: readonly MarketPriceProvider[] = MARKET_PRICE_PROVIDERS.filter(
-  (provider) => !isMediaOnlyPriceProvider(provider),
-);
+export const LLM_PRICE_PROVIDERS: readonly MarketPriceProvider[] = ['Anthropic'];
 
 /**
  * The storage slug per provider.
@@ -79,7 +81,6 @@ export const LLM_PRICE_PROVIDERS: readonly MarketPriceProvider[] = MARKET_PRICE_
  */
 const STORE_SLUG: Record<MarketPriceProvider, string> = {
   KIE: 'kie',
-  Comet: 'comet',
   Anthropic: 'anthropic',
   FAL: 'fal',
 };
@@ -87,7 +88,6 @@ const STORE_SLUG: Record<MarketPriceProvider, string> = {
 /** The baked fallback per provider — real, current-at-build pricing, never a zero rate. */
 const BAKED_BY_PROVIDER: Record<MarketPriceProvider, MarketPriceList> = {
   KIE: BAKED_MARKET_PRICES,
-  Comet: BAKED_COMET_PRICES,
   Anthropic: BAKED_ANTHROPIC_PRICES,
   FAL: BAKED_FAL_PRICES,
 };

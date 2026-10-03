@@ -6,7 +6,9 @@
  *   (a) a `running` legacy / enhancer row older than `BILLING_SWEEP_STALE_MS` (default 15 min) whose turn is
  *       not in flight in this process → settled from its last checkpoint, `interrupted`, NEVER refunded
  *       (`settleInterruptedGeneration`). A stale `managed` row is only marked `interrupted`: its usage is
- *       billed by (b) through the session's cursor, never twice;
+ *       billed by (b) through the session's cursor, never twice. A stale enhancer row that names a session
+ *       (the managed enhancer, `_specs/managed-only_plan.md` D10) is priced from that session instead
+ *       (`recoverEnhancementSession`) — it has no checkpoints to settle from;
  *   (b) every chat bound to a managed session (active within `BILLING_SWEEP_MANAGED_WINDOW_MS`, default
  *       7 days) with no turn in flight here → a cursor settlement (`agent-managed/sweep.ts`), plus every
  *       orphan a failed delete left behind (D4);
@@ -26,7 +28,8 @@
  * "empty" context resolves the developer's real credentials). Specs call `runBillingSweep` directly.
  */
 import type Anthropic from '@anthropic-ai/sdk';
-import { getManagedClient } from '~/lib/.server/agent-managed/config';
+import { getManagedClient, getManagedEngineConfig } from '~/lib/.server/agent-managed/config';
+import { recoverEnhancementSession } from '~/lib/.server/agent-managed/enhance-settle';
 import { getManagedOrphanStore } from '~/lib/.server/agent-managed/orphans';
 import { parseCostCursor } from '~/lib/.server/agent-managed/session-cost';
 import { settlePendingDebits } from '~/lib/.server/agent-managed/settle';
@@ -76,7 +79,12 @@ function emptyReport(): SweepReport {
 }
 
 /** (a) Stale `running` rows a dead process left. Never throws. */
-async function sweepRunningRows(context: unknown, now: number, report: SweepReport['legacy']): Promise<void> {
+async function sweepRunningRows(
+  context: unknown,
+  now: number,
+  report: SweepReport['legacy'],
+  client: Anthropic | null,
+): Promise<void> {
   const staleMs = Math.max(60_000, envNumber(context, 'BILLING_SWEEP_STALE_MS', DEFAULT_SWEEP_STALE_MS));
   let rows;
 
@@ -103,6 +111,42 @@ async function sweepRunningRows(context: unknown, now: number, report: SweepRepo
         /* Its usage is the session's, billed by cursor in (b) — never from this row, or it bills twice. */
         await getGenerationStore(context).markStatus(row.id, 'interrupted');
         report.interrupted += 1;
+        continue;
+      }
+
+      /* A managed enhancement (D10): priced from its one-shot session — there are no checkpoints. */
+      if (row.engine === 'enhancer' && row.managedSessionId) {
+        if (!client || !row.userId) {
+          report.skipped += 1;
+          continue;
+        }
+
+        const recovered = await recoverEnhancementSession({
+          client,
+          generationId: row.id,
+          sessionId: row.managedSessionId,
+          userId: row.userId,
+          model: row.model,
+          sessionHourUsd: getManagedEngineConfig(context).sessionHourUsd,
+          markInterrupted: async () => {
+            await getGenerationStore(context).markStatus(row.id, 'interrupted');
+          },
+          context,
+        });
+
+        if (recovered.outcome === 'settled' || recovered.outcome === 'gone') {
+          report.interrupted += 1;
+        } else if (recovered.outcome === 'running') {
+          report.skipped += 1;
+        } else {
+          report.failed += 1;
+        }
+
+        if (recovered.outcome === 'settled' && recovered.credits > 0) {
+          report.settled += 1;
+          report.credits += recovered.credits;
+        }
+
         continue;
       }
 
@@ -189,9 +233,9 @@ async function sweepOnce(context: unknown, options: { now?: number; client?: Ant
   const now = options.now ?? startedAt;
   const report = emptyReport();
 
-  await sweepRunningRows(context, now, report.legacy);
-
   const client = managedClientOrNull(context, options.client);
+
+  await sweepRunningRows(context, now, report.legacy, client);
 
   if (client) {
     try {

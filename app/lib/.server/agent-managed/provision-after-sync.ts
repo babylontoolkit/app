@@ -18,7 +18,6 @@
  *     (`skipped`), so a legacy deploy never mints agents it will not use. The Provision button stays for a
  *     manual or forced run either way.
  */
-import { resolveAgentEngine } from './config';
 import {
   type ProvisionOptions,
   type ProvisionResult,
@@ -55,7 +54,7 @@ export type ManagedProvisionOutcome =
       promptVersionId: string;
       tiers: ManagedTierOutcome[];
     }
-  | { skipped: 'not-configured' | 'legacy-engine' }
+  | { skipped: 'not-configured' }
   | { error: string };
 
 type Provisioner = (options: ProvisionOptions) => Promise<ProvisionResult>;
@@ -70,10 +69,6 @@ export function setSyncProvisionerForTests(provisioner: Provisioner | undefined)
 export async function provisionAfterSync(context: unknown): Promise<ManagedProvisionOutcome> {
   if (!env(context, 'ANTHROPIC_API_KEY')) {
     return { skipped: 'not-configured' };
-  }
-
-  if (resolveAgentEngine(context) !== 'managed') {
-    return { skipped: 'legacy-engine' };
   }
 
   try {

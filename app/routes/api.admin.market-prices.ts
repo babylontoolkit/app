@@ -4,7 +4,7 @@
  *   GET  /api/admin/market-prices              → the active list + version history + baked reference
  *   POST /api/admin/market-prices  promote     → validate a candidate list, store it, make it live
  *   POST /api/admin/market-prices  rollback    → re-point at a stored version
- *   POST /api/admin/market-prices  fetch-feed  → the vendor's pricing feed (KIE, Comet, fal), for the admin's EYES
+ *   POST /api/admin/market-prices  fetch-feed  → the vendor's pricing feed (KIE, fal), for the admin's EYES
  *
  * This is the ONLY way platform prices change without a deploy — the env price vars are retired
  * (`rates.ts` refuses them). Admin-only (session `isAdmin`), like the template pin: an open promote
@@ -20,7 +20,6 @@ import { requireAdmin } from '~/lib/.server/supabase/auth';
 import { getObjectStore } from '~/lib/.server/storage';
 import { errorResponse } from '~/lib/.server/http';
 import { BAKED_MARKET_PRICES } from '~/lib/.server/billing/baked-market-prices';
-import { BAKED_COMET_PRICES } from '~/lib/.server/billing/baked-comet-prices';
 import { BAKED_ANTHROPIC_PRICES } from '~/lib/.server/billing/baked-anthropic-prices';
 import { BAKED_FAL_PRICES } from '~/lib/.server/billing/baked-fal-prices';
 import {
@@ -33,7 +32,7 @@ import {
   MARKET_PRICE_PROVIDERS,
   type MarketPriceProvider,
 } from '~/lib/.server/billing/market-price-store';
-import { fetchKieMarketFeed, fetchCometMarketFeed, fetchFalMarketFeed } from '~/lib/.server/billing/market-feed';
+import { fetchKieMarketFeed, fetchFalMarketFeed } from '~/lib/.server/billing/market-feed';
 import { env } from '~/lib/.server/env';
 import { NotConfiguredError } from '~/lib/.server/agent/config';
 
@@ -42,7 +41,6 @@ const logger = createScopedLogger('api.admin.market-prices');
 /** The build-time fallback per provider, shown for comparison and as a "reset to baked" source. */
 const BAKED_BY_PROVIDER: Record<MarketPriceProvider, typeof BAKED_MARKET_PRICES> = {
   KIE: BAKED_MARKET_PRICES,
-  Comet: BAKED_COMET_PRICES,
   Anthropic: BAKED_ANTHROPIC_PRICES,
   FAL: BAKED_FAL_PRICES,
 };
@@ -51,7 +49,7 @@ const BAKED_BY_PROVIDER: Record<MarketPriceProvider, typeof BAKED_MARKET_PRICES>
  * Which marketplace a request is about.
  *
  * 🔴 The value arrives in an ADMIN-supplied body and selects which price list a promotion overwrites,
- * so an unrecognised value must never be coerced — writing Comet's rates over KIE's pointer is a
+ * so an unrecognised value must never be coerced — writing one gateway's rates over KIE's pointer is a
  * silent repricing of every generation. Default `KIE` preserves the pre-2026-08-10 request shape
  * exactly (an older admin bundle sends no provider), and anything else is refused by name.
  */
@@ -124,7 +122,7 @@ interface MarketPricesActionBody {
   /** fetch-feed: optional server-side model filter. */
   filter?: string;
 
-  /** Which marketplace this action targets. Absent = KIE, the pre-Comet request shape. */
+  /** Which marketplace this action targets. Absent = KIE, the original request shape. */
   provider?: string;
 }
 
@@ -167,7 +165,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
     if (body.action === 'fetch-feed') {
       /*
        * Each vendor publishes a different shape (KIE: an unauthenticated POST pager returning display
-       * strings; Comet: one authenticated GET returning numbers plus a per-row ratio), so this is a
+       * strings; fal: one authenticated GET per endpoint id), so this is a
        * dispatch rather than a URL swap. Both are for the operator's EYES and neither ever writes.
        */
       if (provider === 'Anthropic') {
@@ -181,19 +179,6 @@ export async function action({ request, context }: ActionFunctionArgs) {
           },
           400,
         );
-      }
-
-      if (provider === 'Comet') {
-        const apiKey = env(context, 'COMET_API_KEY');
-
-        if (!apiKey) {
-          throw new NotConfiguredError(
-            'COMET_API_KEY',
-            'The Comet model feed is authenticated, so the platform key is required to read it.',
-          );
-        }
-
-        return json({ ok: true, feed: await fetchCometMarketFeed(apiKey, { filter: body.filter }) });
       }
 
       if (provider === 'FAL') {

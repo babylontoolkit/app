@@ -69,9 +69,8 @@ function marketPricesToRefresh(context: unknown) {
 export async function loader({ request, context }: LoaderFunctionArgs) {
   try {
     /*
-     * The premium tier below prices from the marketplace list — refresh it at this async doorway.
-     * PLURAL: the paid rungs price from KIE's list on every provider, so a Comet deploy needs both
-     * (`marketPriceProvidersFor`). Refreshing only one leaves the other on its baked table silently.
+     * The premium tier below prices from the marketplace list — refresh it at this async doorway
+     * (`marketPriceProvidersFor` — Anthropic's list, the only LLM list since 2026-10-03).
      */
     await Promise.all(marketPricesToRefresh(context).map((provider) => ensureMarketPrices(provider, context)));
 

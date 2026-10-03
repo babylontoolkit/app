@@ -18,8 +18,7 @@
  * ⚠️ Its evidence, though, was a mis-bill: it argued "on Anthropic the Platinum (fable-5) row settles
  * CHEAPER than Premium (opus-5)". It did, because `MODEL_RATES` had no fable-5 row and `providerRates`
  * gap-filled KIE's $4/$20 over a model Anthropic sells at $10/$50 (fixed 2026-08-12). **The ladder is
- * cost-monotonic on every gateway today** — Anthropic $2 / $5 / $10, Comet $1.60 / $4 / $8, KIE
- * $0.85 / $2 / $4. Do not take that as licence to order the rungs BY cost: capability order is what the
+ * cost-monotonic on Anthropic** — $2 / $5 / $10 (the only LLM gateway since 2026-10-03). Do not take that as licence to order the rungs BY cost: capability order is what the
  * thresholds, the first-build lock and the step-down-to-standard rule are all written against, and a
  * price coincidence is not a design. The lesson is narrower and sharper — **a rule justified by a
  * measurement inherits that measurement's bugs**, and this one was quoted in four files for two weeks.
@@ -126,8 +125,7 @@ export const DEFAULT_PLATINUM_MODEL = 'claude-fable-5-1';
  * Above Premium's 1200 and well above `SIGNUP_GRANT_CREDITS` (1000).
  *
  * The ladder must stay monotonic in threshold or a bare deploy offers a dearer rung for less. It is
- * cost-monotonic too, on every gateway: Comet prices fable-5 at $8/$40 against opus-5's $4/$20, and
- * Anthropic at $10/$50 against $5/$25. **Rungs still order CAPABILITY, not price** — the two agreeing
+ * cost-monotonic too on Anthropic: fable-5 at $10/$50 against opus-5's $5/$25. **Rungs still order CAPABILITY, not price** — the two agreeing
  * is a coincidence to re-check, never a rule to reorder by.
  */
 export const DEFAULT_PLATINUM_MINIMUM_CREDITS = 2000;

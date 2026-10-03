@@ -35,35 +35,6 @@ describe('deliveryModeFor', () => {
     }
   });
 
-  it('reports KIE + claude as batched — measured 3/3 request shapes, 2026-08-03', () => {
-    /*
-     * `scripts/stream-probe.mjs`: 26,539 chars delivered 100% in the final second after 130s of
-     * silence, and identically with thinking disabled and with no thinking fields at all. Thinking is
-     * not the lever — the buffering is in KIE's Claude ADAPTER, which is why the key is (provider, family).
-     */
-    expect(deliveryModeFor('KIE', 'claude-opus-5')).toBe('batched');
-  });
-
-  it('reports KIE + codex as streaming — measured 2026-08-04, first delta at 3.7s', () => {
-    expect(deliveryModeFor('KIE', 'gpt-5-6-sol')).toBe('streamed');
-  });
-
-  it('reports KIE + gemini as streaming (provisional — big-answer probe owed, T11)', () => {
-    expect(deliveryModeFor('KIE', 'gemini-3-5-flash')).toBe('streamed');
-  });
-
-  /*
-   * ⚠️ NOT A SUPPORTED PATH. `kie.ts` refuses the `chat` family at model resolution — KIE fronts no
-   * Grok/Kimi/Qwen/GLM/DeepSeek/MiniMax id — so nothing in production can read this entry; it exists
-   * only so the exhaustive `Record<ModelFamily, DeliveryMode>` compiles. This is pinned as `streamed`
-   * because that is the standing default for an unmeasured surface (the note below), NOT because
-   * anyone measured KIE serving a chat model. If KIE ever does front one, MEASURE it with
-   * `scripts/stream-probe.mjs` before believing this value.
-   */
-  it('reports KIE + chat as streaming — the unmeasured default on an UNREACHABLE pair', () => {
-    expect(deliveryModeFor('KIE', 'grok-4.5')).toBe('streamed');
-  });
-
   /*
    * 🔴 Both unknowns resolve to `streamed`, and for the same reason: `batched` renders a sentence
    * telling the user to expect NOTHING for minutes. Saying that about a surface nobody has probed
@@ -74,19 +45,30 @@ describe('deliveryModeFor', () => {
     expect(deliveryModeFor('Bedrock' as never, 'claude-opus-5')).toBe('streamed');
   });
 
+  /*
+   * The KIE/Comet providers are gone (2026-10-03, `_specs/anthropic-only_plan.md`), so a deploy whose
+   * stale config or record still names one must get the safe answer, never a batch claim.
+   */
+  it('assumes a RETIRED provider (KIE, Comet) streams', () => {
+    expect(deliveryModeFor('KIE' as never, 'claude-opus-5')).toBe('streamed');
+    expect(deliveryModeFor('Comet' as never, 'claude-opus-5')).toBe('streamed');
+  });
+
   it('assumes an unknown, undefined or empty MODEL streams', () => {
-    expect(deliveryModeFor('KIE', 'llama-4-maverick')).toBe('streamed');
-    expect(deliveryModeFor('KIE', undefined)).toBe('streamed');
-    expect(deliveryModeFor('KIE', '')).toBe('streamed');
+    expect(deliveryModeFor('Anthropic', 'llama-4-maverick')).toBe('streamed');
+    expect(deliveryModeFor('Anthropic', undefined)).toBe('streamed');
+    expect(deliveryModeFor('Anthropic', '')).toBe('streamed');
   });
 
   /*
-   * The batch sentence (`agent-status.ts` `deliveryNote`, gated on `deliveryMode === 'batched'`) is
-   * reachable on EXACTLY ONE surface. Iterated over the DECLARED UNIONS rather than a hand-written
+   * The batch sentence (`agent-status.ts` `deliveryNote`, gated on `deliveryMode === 'batched'`) was
+   * reachable on exactly one surface (KIE + claude) and, with Anthropic the only provider since
+   * 2026-10-03, is reachable on NONE. Iterated over the DECLARED UNIONS rather than a hand-written
    * list: a test written against the same enumeration a bug lives in cannot see what the enumeration
-   * missed, and a family added to `MODEL_FAMILIES` must not inherit the batch claim by omission.
+   * missed, and a provider or family added later must not inherit the batch claim by omission — a new
+   * batched row has to be measured (`scripts/stream-probe.mjs`) and then named here.
    */
-  it('yields batched for KIE + claude and for no other (provider, family) pair', () => {
+  it('yields batched for no configured (provider, family) pair', () => {
     const batched: string[] = [];
 
     for (const provider of PLATFORM_PROVIDERS) {
@@ -97,25 +79,19 @@ describe('deliveryModeFor', () => {
       }
     }
 
-    expect(batched).toEqual(['KIE/claude']);
+    expect(PLATFORM_PROVIDERS).toEqual(['Anthropic']);
+    expect(batched).toEqual([]);
   });
 });
 
 describe('providerDeliveryMode (deprecated delegate)', () => {
-  it('never claims batched for a provider whose families differ', () => {
-    /*
-     * KIE fronts three adapters and only one of them buffers, so the provider-wide answer must be the
-     * safe one — a stray caller can never be told to expect silence on a surface that streams.
-     */
-    expect(providerDeliveryMode('KIE')).toBe('streamed');
-  });
-
   it('reports Anthropic as streaming', () => {
     expect(providerDeliveryMode('Anthropic')).toBe('streamed');
   });
 
-  it('assumes an UNMEASURED provider streams', () => {
+  it('assumes an UNMEASURED or RETIRED provider streams', () => {
     expect(providerDeliveryMode('Bedrock' as never)).toBe('streamed');
+    expect(providerDeliveryMode('KIE' as never)).toBe('streamed');
   });
 });
 

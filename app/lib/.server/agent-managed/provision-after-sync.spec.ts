@@ -30,7 +30,6 @@ vi.mock('~/lib/.server/agent/config', async (importOriginal) => ({
 
 vi.mock('~/lib/.server/skills/sync', () => ({ syncSkills: mocks.syncSkills }));
 vi.mock('~/lib/.server/prompt/build', () => ({ buildSystemPrompt: mocks.buildSystemPrompt }));
-vi.mock('~/lib/.server/prompt/cache-warmer', () => ({ warmAfterPromptChange: () => undefined }));
 vi.mock('~/lib/.server/prompt/active', () => ({ invalidateActivePrompt: () => undefined }));
 
 vi.mock('~/lib/.server/monitoring', async (importOriginal) => ({
@@ -227,13 +226,13 @@ describe('Synchronize provisions the managed agent (T12)', () => {
     expect(mocks.alert).not.toHaveBeenCalled();
   });
 
-  it('a legacy deploy (the kill switch) mints no agent', async () => {
+  it('a stale AGENT_ENGINE=legacy still provisions — there is no other engine (2026-10-03)', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     vi.stubEnv('AGENT_ENGINE', 'legacy');
 
-    const { body } = await refresh();
+    await refresh();
 
-    expect(provisioner).not.toHaveBeenCalled();
-    expect(body.managedAgent).toEqual({ skipped: 'legacy-engine' });
+    expect(provisioner).toHaveBeenCalled();
   });
 
   it('CONTROL: a FAILED sync never provisions (the previous version stays, nothing new to provision)', async () => {

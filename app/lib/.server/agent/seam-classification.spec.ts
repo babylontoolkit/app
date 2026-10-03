@@ -229,7 +229,6 @@ describe('every agent-pipeline participant is classified in spec/agent-seams.md'
       'agent/budgets.ts',
       'agent/delivery.ts',
       'agent/preload-skills.ts',
-      'prompt/cache-warmer.ts',
     ]) {
       expect(doc, `${straddler} must be named as a straddler`).toContain(straddler);
     }

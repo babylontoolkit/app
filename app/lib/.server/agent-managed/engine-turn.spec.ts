@@ -2340,3 +2340,143 @@ describe('pending debit intents across a rebind and a refund (verifier money def
     expect(carry?.note).toMatch(/carried over/);
   });
 });
+
+describe('Plan mode and MCP turns run on the managed engine (managed-only plan D1–D7)', () => {
+  it('a Plan turn: refused writes outside _specs/, the plan file lands, marks in the transcript, statusKind plan', async () => {
+    fake.script = (async (api) => {
+      await api.callTool('project_write', { path: 'src/scripts/Drift.ts', content: 'nope' });
+      await api.callTool('project_write', { path: '_specs/drift_plan.md', content: '- [ ] T1 drift' });
+      api.modelRequest(USAGE_3);
+      api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'Plan written.' }] });
+      api.endTurn();
+    }) satisfies Script;
+
+    const generation = await turn({ chatMode: 'discuss', messages: [userMessage('/bt-plan drifting')] });
+    const run = await drive(generation);
+
+    expect(run.error).toBeUndefined();
+    expect(generation.discussMode).toBe(true);
+    expect(generation.statusKind).toBe('plan');
+
+    /* Only the _specs/ write reached the browser; the src/ write was refused on the server. */
+    expect(run.workspaceCalls.map((c) => (c.params as { path: string }).path)).toEqual(['_specs/drift_plan.md']);
+
+    const results = fake.sends.flatMap((s) => s.events).filter((e) => e.type === 'user.custom_tool_result');
+
+    expect(results[0]).toMatchObject({
+      is_error: true,
+      content: [{ text: expect.stringMatching(/^Plan mode is read-only/) }],
+    });
+
+    /* The message carried the Plan note; the transcript carries both marks so "Build this plan" survives a reload. */
+    expect((fake.sends[0].events[0] as { content: Array<{ text: string }> }).content[0].text).toContain(
+      '[Plan mode — this turn only]',
+    );
+
+    await generation.settlement;
+
+    const stored = await getChat(PROJECT, chatId);
+    const reply = (stored?.messages as Array<{ role?: string; annotations?: unknown[] }> | undefined)?.find(
+      (m) => m.role === 'assistant',
+    );
+
+    expect(reply?.annotations?.slice(0, 2)).toEqual(['plan-mode', 'no-replay']);
+  });
+
+  it('a Plan turn on a project that still owes its first build runs no build phases', async () => {
+    fake.script = (async (api) => {
+      api.modelRequest(USAGE_3);
+      api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'Here is how I would build it.' }] });
+      api.endTurn();
+    }) satisfies Script;
+
+    const generation = await turn({ chatMode: 'discuss', owesBuild: true });
+    const run = await drive(generation);
+
+    expect(run.error).toBeUndefined();
+    expect(await generation.creationPhasesCompleted).toBeUndefined();
+    expect((fake.sends[0].events[0] as { content: Array<{ text: string }> }).content[0].text).not.toContain(
+      MANAGED_BUILD_OPEN,
+    );
+  });
+
+  it('an MCP turn: one-line notice, mcp_call relayed to the browser by (server, tool), the answer sent back', async () => {
+    fake.script = (async (api) => {
+      await api.callTool('mcp_call', { server: 'docs', tool: 'search', arguments: { q: 'drift' } });
+      api.modelRequest(USAGE_3);
+      api.endTurn();
+    }) satisfies Script;
+
+    const generation = await turn({ mcpTools: [{ name: 'search', server: 'docs', description: 'Search' }] });
+    const relayed: Array<{ toolCallId: string; toolName: string; server: string; args: unknown }> = [];
+
+    generation.onMcpToolCall((event) => {
+      relayed.push(event);
+      queueMicrotask(() =>
+        deliverClientToolResult({
+          generationId: generation.generationId,
+          toolCallId: event.toolCallId,
+          userId: USER.id,
+          result: { hits: 3 },
+        }),
+      );
+    });
+
+    const run = await drive(generation);
+
+    expect(run.error).toBeUndefined();
+    expect(relayed).toEqual([
+      { toolCallId: expect.any(String), toolName: 'search', server: 'docs', args: { q: 'drift' } },
+    ]);
+    expect(fake.sends.flatMap((s) => s.events).find((e) => e.type === 'user.custom_tool_result')).toMatchObject({
+      content: [{ text: '{"hits":3}' }],
+    });
+    expect((fake.sends[0].events[0] as { content: Array<{ text: string }> }).content[0].text).toContain(
+      '1 MCP tool(s) running',
+    );
+
+    /* A NEW session is created with the current tool list, MCP tools included (D7). */
+    const tools = (fake.sessions.get('sesn_1')!.createParams.agent as { tools: Array<{ name?: string }> }).tools;
+
+    expect(tools.map((t) => t.name)).toContain('mcp_call');
+  });
+
+  it('an EXISTING session without the MCP tools is given them on its first MCP turn — only then (D7)', async () => {
+    fake.agentModels = { agent_1: MODEL };
+    fake.script = (async (api) => {
+      api.modelRequest(USAGE_3);
+      api.endTurn();
+    }) satisfies Script;
+
+    await drive(await turn());
+
+    /* Simulate a session created before `mcp_*` existed: its tool list lacks them. */
+    const session = fake.sessions.get('sesn_1')!;
+
+    session.createParams.agent = {
+      ...(session.createParams.agent as object),
+      tools: [{ type: 'custom', name: 'project_write' }],
+    };
+
+    await drive(await turn({ messages: [userMessage('tweak it')] }));
+    expect(fake.updates.filter((u) => (u.params.agent as { tools?: unknown } | undefined)?.tools)).toEqual([]);
+
+    await drive(
+      await turn({
+        messages: [userMessage('use the docs')],
+        mcpTools: [{ name: 'search', server: 'docs' }],
+      }),
+    );
+
+    const toolUpdates = fake.updates.filter((u) => (u.params.agent as { tools?: unknown } | undefined)?.tools);
+
+    expect(toolUpdates).toHaveLength(1);
+    expect(
+      ((toolUpdates[0].params.agent as { tools: Array<{ name?: string }> }).tools ?? []).map((t) => t.name),
+    ).toContain('mcp_call');
+
+    /* A session that already has them is left alone on the next MCP turn. */
+    await drive(await turn({ messages: [userMessage('again')], mcpTools: [{ name: 'search', server: 'docs' }] }));
+    expect(fake.updates.filter((u) => (u.params.agent as { tools?: unknown } | undefined)?.tools)).toHaveLength(1);
+  });
+});

@@ -10,7 +10,7 @@
 
 The common factor is that we own the loop, the prefix, the provider choice, the retries and the verification policy. Managed Agents moves the loop, caching, compaction and session durability to Anthropic.
 
-**Scope.** Build turns (first build and edits) on the new engine, behind a flag. Plan mode, the Unity Bridge tools and MCP stay on the legacy engine until the new one is proven (D9). Nothing is deleted (hide-don't-delete): `AGENT_ENGINE=legacy` restores today's behaviour byte for byte.
+**Scope.** Build turns (first build and edits) on the new engine, behind a flag. Plan mode, the Unity Bridge tools and MCP stay on the legacy engine until the new one is proven (D9). **Superseded for Plan mode and MCP (and the prompt enhancer) on 2026-10-03 by `_specs/managed-only_plan.md`** — on a managed deploy every turn runs here; the Unity Bridge tools remain legacy-only. Nothing is deleted (hide-don't-delete): `AGENT_ENGINE=legacy` restores today's behaviour byte for byte.
 
 ---
 

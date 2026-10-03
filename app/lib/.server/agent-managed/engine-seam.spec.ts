@@ -123,8 +123,9 @@ describe('source scan — the walls and the gate run before either engine', () =
   const route = read('app/routes/api.agent.ts');
   const action = functionBody(route, 'async function agentAction(');
 
-  it('the route runs both walls, the attachment caps and the claim before dispatching to either engine', () => {
-    expect(orderViolations(action, WALLS, DISPATCH, { requireAfter: 'all' })).toEqual([]);
+  it('the route runs both walls, the attachment caps and the claim before dispatching to the managed engine', () => {
+    /* Anthropic Managed Agents is the only engine since 2026-10-03 (`_specs/anthropic-only_plan.md`). */
+    expect(orderViolations(action, WALLS, ['runManagedGeneration('], { requireAfter: 'all' })).toEqual([]);
   });
 
   it('the legacy engine runs the credit gate before any provider call', () => {

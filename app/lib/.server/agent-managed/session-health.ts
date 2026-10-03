@@ -39,8 +39,27 @@ export type SessionInspection =
        * (`_specs/effort-selector_plan.md` D3). Undefined when not reported or not a level we know.
        */
       effort?: EffortLevel;
+
+      /**
+       * The names of the session's CUSTOM tools (`session.agent.tools`), or undefined when not reported — how
+       * an MCP turn finds a session created before `mcp_*` existed (`_specs/managed-only_plan.md` D7).
+       */
+      toolNames?: string[];
     }
   | { kind: 'dead'; reason: 'terminated' | 'archived' | 'missing' };
+
+/** The custom tool names a retrieved session carries, or undefined when it reports no tool list. */
+export function sessionToolNames(session: unknown): string[] | undefined {
+  const tools = (session as { agent?: { tools?: unknown } } | null)?.agent?.tools;
+
+  if (!Array.isArray(tools)) {
+    return undefined;
+  }
+
+  return tools
+    .filter((t): t is { type: string; name: string } => Boolean(t) && t.type === 'custom' && typeof t.name === 'string')
+    .map((t) => t.name);
+}
 
 /** The model a retrieved session runs (`session.agent.model.id`), or undefined when not reported. */
 export function sessionModel(session: unknown): string | undefined {
@@ -91,6 +110,7 @@ export async function inspectSession(client: Anthropic, sessionId: string): Prom
       listCostCents: Number.isFinite(cents) ? cents : 0,
       model: sessionModel(session),
       effort: sessionEffort(session),
+      toolNames: sessionToolNames(session),
     };
   } catch (error) {
     if (isNotFound(error)) {

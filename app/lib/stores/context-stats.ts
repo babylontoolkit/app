@@ -54,7 +54,7 @@ export interface ContextStats {
   model: string;
 
   /**
-   * The gateway that served the last turn — `KIE`, `Comet` or `Anthropic`.
+   * The gateway that served the last turn — `Anthropic` (the only LLM provider since 2026-10-03).
    *
    * Empty until a turn has run. Worth showing beside the credits because with `AUTO_MODEL_SELECT` the
    * platform picks a gateway per turn, and the same model bills differently on each: a user watching

@@ -55,13 +55,9 @@ interface MarketPricesState {
 /**
  * One row of a vendor's pricing feed, NORMALISED — the two vendors publish different shapes.
  *
- * KIE returns display STRINGS (`modelDescription`, `usdPrice`); Comet returns numbers plus a
- * per-row `ratio`, where the charged rate is `official x ratio`. Rather than render one shape and
- * silently blank the other, the panel maps both onto {label, detail, price} at the fetch seam.
- *
- * 🔴 For Comet the price shown is the CHARGED one, with the official rate and the ratio beside it.
- * Showing `pricing.input` alone would show a number that is not what we pay — the exact misreading
- * that produced "no discount on Opus 5" during this feature's investigation.
+ * KIE returns display STRINGS (`modelDescription`, `usdPrice`); fal returns one account-specific base
+ * price per model. Rather than render one shape and silently blank the other, the panel maps both onto
+ * {label, detail, price} at the fetch seam.
  */
 interface FeedRow {
   label: string;
@@ -83,22 +79,15 @@ const UNIT_LABEL: Record<MediaRow['unit'], string> = {
  * 🔴 It rides in EVERY request, and a promotion targets whichever provider is selected — so the
  * selected value and the displayed list must never come apart. `load()` re-fetches on every change
  * and the response echoes its own `provider` back, which is what the header renders: the panel shows
- * what the SERVER says it loaded, never what the local state hoped for. Promoting Comet's rates
- * over KIE's pointer is a silent repricing of every generation, so this is not a cosmetic filter.
+ * what the SERVER says it loaded, never what the local state hoped for. Promoting one gateway's rates
+ * over another's pointer is a silent repricing, so this is not a cosmetic filter.
  */
-type PriceProvider = 'KIE' | 'Comet' | 'Anthropic' | 'FAL';
+type PriceProvider = 'KIE' | 'Anthropic' | 'FAL';
 
 /** Media-only gateways sell no LLM — their list has no LLM table to show (mirrors the server rule). */
 const MEDIA_ONLY_PROVIDERS: readonly PriceProvider[] = ['FAL'];
 
-/**
- * Map a vendor feed row onto the panel's three columns.
- *
- * ⚠️ The Comet branch shows `charged` as the headline and the official rate + ratio as the detail,
- * because the charged number is the one that has to match the promoted list. A `ratio` that is not
- * 0.8 is the interesting case (three rows carry 1.0), so it is always printed rather than elided when
- * it happens to be the common value.
- */
+/** Map a vendor feed row onto the panel's three columns. */
 function normaliseFeedRow(row: Record<string, unknown>, provider: PriceProvider): FeedRow {
   if (provider === 'FAL') {
     /*
@@ -111,20 +100,6 @@ function normaliseFeedRow(row: Record<string, unknown>, provider: PriceProvider)
       label: String(row.endpointId ?? ''),
       detail: `account price · ${String(row.currency ?? '')}`,
       price: price == null ? '—' : `$${price} per ${String(row.unit ?? '?')}`,
-    };
-  }
-
-  if (provider === 'Comet') {
-    const inCharged = row.chargedInputPerMTok as number | null;
-    const outCharged = row.chargedOutputPerMTok as number | null;
-    const ratio = row.ratio as number | null;
-
-    return {
-      label: String(row.id ?? ''),
-      detail:
-        `${row.modelType ?? ''}` +
-        (ratio == null ? '' : ` · official $${row.officialInputPerMTok}/$${row.officialOutputPerMTok} × ${ratio}`),
-      price: inCharged == null ? '—' : `$${inCharged} / $${outCharged} per MTok`,
     };
   }
 
@@ -276,7 +251,7 @@ export function MarketPricesSection() {
             onChange={(e) => setProvider(e.target.value as PriceProvider)}
             aria-label="Price list provider"
           >
-            {(state.providers ?? ['KIE', 'Comet', 'Anthropic', 'FAL']).map((name) => (
+            {(state.providers ?? ['KIE', 'Anthropic', 'FAL']).map((name) => (
               <option key={name} value={name}>
                 {name}
               </option>

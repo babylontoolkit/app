@@ -211,76 +211,17 @@ function refuseRetiredPriceEnv(context?: unknown): void {
   return undefined;
 }
 
-/**
- * The operator's `KIE_DEFAULT_MODEL`, validated against the ACTIVE price list (2026-07-18).
- *
- * The model and its price used to be one env-var group (`KIE_INPUT_DOLLARS` et al); now the price
- * side lives in the marketplace price list, so this var is a pure SELECTOR — and it is only accepted
- * if the active list prices it. `ratesFor` falls back to the provider's most expensive row for an
- * unknown model, so an unpriced selection would not fail, it would bill at Opus 4.8's price forever.
- * "Is this model configured?" and "do we know what it costs?" remain the same question; the answer
- * just moved to the admin panel.
+/*
+ * `kieDefaultModel`, `kieRates` and `cometRates` lived here until 2026-10-03: KIE and Comet were LLM gateways
+ * with their own rate tables. Anthropic is the only LLM provider now (`_specs/anthropic-only_plan.md` D3/D4);
+ * KIE's list prices MEDIA only (`media/service.ts` reads it through `lookupMediaPrice`).
  */
-export function kieDefaultModel(context?: unknown): string | undefined {
-  refuseRetiredPriceEnv(context);
-
-  const model = env(context, 'KIE_DEFAULT_MODEL')?.trim();
-
-  if (!model) {
-    return undefined;
-  }
-
-  const priced = activeMarketPrices('KIE').llm;
-
-  if (!priced[model]) {
-    throw new NotConfiguredError(
-      `KIE_DEFAULT_MODEL="${model}"`,
-      'The Marketplace price list has no row for it, so we cannot bill it — and an unpriced model does not ' +
-        'bill as free, it bills at the most expensive model we know of. Add its row (input + output USD per ' +
-        `million tokens) in Settings → Admin → Marketplace prices, then promote. Priced models: ${
-          Object.keys(priced).join(', ') || '(none)'
-        }.`,
-    );
-  }
-
-  return model;
-}
-
-/**
- * KIE's rate table — the ACTIVE marketplace price list, as `ModelRates` (cache derived per row).
- *
- * Before any promotion this is exactly the baked table (`KIE_MODEL_RATES`); after one, it is whatever
- * the operator promoted. Callers hold no fallback of their own — a list that failed to load already
- * fell back to baked inside `activeMarketPrices()`.
- */
-export function kieRates(context?: unknown): Record<string, ModelRates> {
-  refuseRetiredPriceEnv(context);
-
-  return llmRatesFromList(activeMarketPrices('KIE'));
-}
-
-/**
- * Comet's rate table — the ACTIVE Comet marketplace price list, as `ModelRates`.
- *
- * The exact twin of `kieRates`, reading its OWN promoted list. The two must never share one: both
- * price `claude-sonnet-5`, at different rates ($0.85/$4.275 vs $1.60/$8), so a lookup against the
- * wrong list returns a plausible number rather than an error — the failure shape this whole file
- * exists to prevent.
- *
- * Cache rates DERIVE for every claude row (Comet quotes none), which is the family rule, unchanged.
- */
-export function cometRates(context?: unknown): Record<string, ModelRates> {
-  refuseRetiredPriceEnv(context);
-
-  return llmRatesFromList(activeMarketPrices('Comet'));
-}
 
 /**
  * Anthropic's rate table — the ACTIVE Anthropic price list (Settings → Admin → Marketplace prices), as
  * `ModelRates` (2026-09-29).
  *
- * The twin of `kieRates`/`cometRates`, so a model released after this build ships is one Admin-panel
- * row away on Anthropic too, never a code change.
+ * A model released after this build ships is one Admin-panel row away, never a code change.
  *
  * ⚠️ One difference, and it is the safe one: `MODEL_RATES` states EXACT cache rates (some models read
  * cache far below the family's 0.1x), while a promoted claude row cannot carry cache keys. So a row
@@ -646,8 +587,6 @@ export function providerRates(context?: unknown): Record<string, Record<string, 
 
   return {
     Anthropic: withTiers(native.Anthropic),
-    KIE: withTiers(native.KIE),
-    Comet: withTiers(native.Comet),
   };
 }
 
@@ -659,13 +598,9 @@ export function providerRates(context?: unknown): Record<string, Record<string, 
  * including KIE, which does not sell it. The provider picker asks this table instead, so a turn on a
  * paid rung is only ever routed to a gateway that actually serves that rung's model.
  */
-export function nativeProviderRates(
-  context?: unknown,
-): Record<'Anthropic' | 'KIE' | 'Comet', Record<string, ModelRates>> {
+export function nativeProviderRates(context?: unknown): Record<'Anthropic', Record<string, ModelRates>> {
   return {
     Anthropic: anthropicRates(context),
-    KIE: kieRates(context),
-    Comet: cometRates(context),
   };
 }
 

@@ -10,9 +10,7 @@ import { type ActionFunctionArgs } from '@remix-run/cloudflare';
 import { projectOwesBuild } from '~/lib/agent/creation-plan';
 import { createDataStream, formatDataStreamPart, type DataStreamWriter, type Message } from 'ai';
 import { createScopedLogger } from '~/utils/logger';
-import { runAgentGeneration } from '~/lib/.server/agent/proxy';
-import { resolveAgentEngine } from '~/lib/.server/agent-managed/config';
-import { resolveEngineForRequest, selectEngineForTurn } from '~/lib/.server/agent-managed/engine-select';
+import type { AgentGeneration } from '~/lib/.server/agent/proxy';
 import { runManagedGeneration } from '~/lib/.server/agent-managed/engine';
 import { NotConfiguredError } from '~/lib/.server/agent/config';
 import { requireVerifiedUser } from '~/lib/.server/supabase/auth';
@@ -20,7 +18,6 @@ import { requireOwnedProject } from '~/lib/.server/projects/ownership';
 import { validateAttachments } from '~/lib/.server/agent/attachments';
 import { claimProject, resolveClaimTtlMs, shouldClaimProject } from '~/lib/.server/agent/inflight';
 import { env } from '~/lib/.server/env';
-import { sanitizeGameBackend } from '~/lib/.server/game-backend/separation';
 import { ShellActionStreamFilter } from '~/lib/.server/agent/shell-strip';
 import { ProtocolTagStreamFilter } from '~/lib/.server/agent/protocol-strip';
 import { typicalDurationMs } from '~/lib/.server/agent/delivery';
@@ -30,26 +27,11 @@ import { NO_REPLAY, PLAN_MODE } from '~/types/message-marks';
 import { getMonitor } from '~/lib/.server/monitoring';
 import { keepAlive } from '~/lib/.server/runtime/keep-alive';
 import type { FileMap } from '~/lib/.server/llm/constants';
-import type { IProviderSetting } from '~/types/model';
 
 const logger = createScopedLogger('api.agent');
 
 export async function action(args: ActionFunctionArgs) {
   return agentAction(args);
-}
-
-function parseCookies(header: string | null): Record<string, string> {
-  const cookies: Record<string, string> = {};
-
-  for (const item of (header || '').split(';')) {
-    const [name, ...rest] = item.trim().split('=');
-
-    if (name && rest.length) {
-      cookies[decodeURIComponent(name.trim())] = decodeURIComponent(rest.join('=').trim());
-    }
-  }
-
-  return cookies;
 }
 
 async function agentAction({ context, request }: ActionFunctionArgs) {
@@ -160,15 +142,6 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
     managedResume?: boolean;
   }>();
 
-  const cookies = parseCookies(request.headers.get('Cookie'));
-
-  /*
-   * BYOK keys ride in a cookie (they are the user's own, client-stored). The proxy ignores them
-   * unless PRO_FEATURES_ENABLED and a verified entitlement — never trusted from the client alone.
-   */
-  const apiKeys: Record<string, string> = JSON.parse(cookies.apiKeys || '{}');
-  const providerSettings: Record<string, IProviderSetting> = JSON.parse(cookies.providers || '{}');
-
   /*
    * Held across the whole STREAM, not just this function — the response returns while generation is
    * still running, so releasing on return would free the project while its files are still being
@@ -241,107 +214,46 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
         : undefined;
 
     /*
-     * THE ENGINE (managed-agents-engine plan T2, D9) — chosen only AFTER the walls, the attachment caps
-     * and the claim above, which run identically for both engines (`engine-seam.spec.ts` pins the
-     * order). `managed` (the default, T12) runs build turns on Anthropic's hosted loop; `legacy` (the
-     * `AGENT_ENGINE=legacy` kill switch) is the call below. Plan/MCP stay legacy (`selectEngineForTurn`).
-     */
-    const engine = selectEngineForTurn({
-      // `engineOverride` is the eval harness's (T11) — honoured only off production with AGENT_ENGINE_EVAL_OVERRIDE=true.
-      engine: resolveEngineForRequest({
-        deployEngine: resolveAgentEngine(context),
-        override: (body as { engineOverride?: unknown }).engineOverride,
-        context,
-      }),
-      chatMode: body.chatMode,
-      hasMcpTools: (body.mcpTools?.length ?? 0) > 0,
-    });
-
-    /*
-     * A RESUME (T6) is never re-routed: it names a managed session's turn, and the legacy engine would
-     * treat the same request as a fresh send of the last user message — re-running the whole turn.
+     * THE ENGINE — Anthropic Managed Agents, the ONLY one (owner, 2026-10-03, `_specs/anthropic-only_plan.md`
+     * D1/D2). Reached only AFTER the walls, the attachment caps and the claim above (`engine-seam.spec.ts`
+     * pins the order). Every turn — build, Plan mode, MCP, repair, resume — runs here; the legacy
+     * `runAgentGeneration` loop is not a path any more (`anthropic-only.spec.ts` fails if a route calls it).
      */
     const resume = body.managedResume === true;
 
-    if (resume && resolveAgentEngine(context) !== 'managed') {
-      throw Object.assign(new Error('There is no managed turn to resume.'), { statusCode: 409, isRetryable: false });
-    }
+    const generation = await runManagedGeneration({
+      messages: body.messages,
+      files: body.files,
+      chatId: body.chatId,
+      user,
+      projectId: body.projectId,
+      abortSignal: turnSignal,
+      errors: body.errors,
+      repairOf: body.repairOf,
+      repairAttempt: body.repairAttempt,
 
-    const generation =
-      engine === 'managed' || resume
-        ? await runManagedGeneration({
-            messages: body.messages,
-            files: body.files,
-            chatId: body.chatId,
-            user,
-            projectId: body.projectId,
-            abortSignal: turnSignal,
-            errors: body.errors,
-            repairOf: body.repairOf,
-            repairAttempt: body.repairAttempt,
-            tier: body.tier,
-            effort: body.effort,
-            owesBuild: projectOwesBuild(project?.creationHandoff),
+      /*
+       * `tier` wins; a stale bundle's deprecated `premium: true` (no `tier`) still asks for Premium — the
+       * alias the legacy loop honoured, kept here since this is now the only route to an engine. A request,
+       * re-derived by `decideModelTier`, so it can never grant more than the balance allows.
+       */
+      tier: body.tier ?? (body.premium === true ? 'premium' : undefined),
+      effort: body.effort,
+      owesBuild: projectOwesBuild(project?.creationHandoff),
 
-            /* The ROW's plan — which phases a managed first build still owes (T9); never the body's `creationPhase`. */
-            creationPlan: project?.creationHandoff?.plan,
-            starterId: project?.templateId,
-            useAssetLibrary: body.useAssetLibrary,
-            resume,
-            context,
-          })
-        : await runAgentGeneration({
-            messages: body.messages,
-            files: body.files,
-            chatId: body.chatId,
-            user,
-            projectId: body.projectId,
+      /* The ROW's plan — which phases a managed first build still owes (T9); never the body's `creationPhase`. */
+      creationPlan: project?.creationHandoff?.plan,
+      starterId: project?.templateId,
+      useAssetLibrary: body.useAssetLibrary,
 
-            /*
-             * Stop (§4.12). Remix hands us the client's disconnect signal, so closing the stream (the Stop
-             * button, or a closed tab) aborts the provider call instead of leaving it running and billing
-             * us for output nobody will ever read. A later send from the same tab aborts it the same way.
-             */
-            abortSignal: turnSignal,
+      /* Plan mode (§4.2.9) — read-only by the managed dispatcher's wall (managed-only plan D1). */
+      chatMode: body.chatMode,
 
-            errors: body.errors,
-            repairOf: body.repairOf,
-            repairAttempt: body.repairAttempt,
-            model: body.model,
-            tier: body.tier,
-            premium: body.premium,
-            effort: body.effort,
-            chatMode: body.chatMode,
-            useAssetLibrary: body.useAssetLibrary,
-            toolkitSystems: body.toolkitSystems,
-            creationPhase: body.creationPhase,
-
-            /*
-             * Does this project still owe a build? Derived from the ROW, never from the body — see the
-             * ownership check above and `projectOwesBuild`. A generation that names no project cannot be a
-             * first build (there is nothing to build into), so `undefined` resolves to `false` downstream.
-             */
-            owesBuild: projectOwesBuild(project?.creationHandoff),
-
-            /*
-             * Which starter game type this project was created from (§4.4) — the row, never the body, for
-             * the same reason as `owesBuild` directly above: it is a fact about the project, and a caller
-             * who could name their own starter could hand themselves a base scene from someone else's.
-             */
-            starterId: project?.templateId,
-
-            /*
-             * §4.15 hard separation: a client could post OUR platform project ref as its "game backend".
-             * Sanitise at the boundary so a claim pointing at the platform Supabase becomes "no backend"
-             * rather than an RLS-first note scaffolding game code against our own database.
-             */
-            gameBackend: sanitizeGameBackend(body.gameBackend, context),
-            assetNotes: body.assetNotes,
-            mcpLiveTools: body.mcpTools,
-            apiKeys,
-            providerSettings,
-            context,
-          });
+      /* The project's live MCP tools (§4.14), reached through `mcp_list_tools` / `mcp_call` (D4). */
+      mcpTools: body.mcpTools,
+      resume,
+      context,
+    });
 
     const dataStream = createDataStream({
       async execute(stream) {
@@ -408,11 +320,7 @@ function parseClientId(value: unknown): string | undefined {
 }
 
 /** The visible stream: prose + actions, then the annotations the client's badges are built from. */
-async function streamGeneration(
-  stream: DataStreamWriter,
-  generation: Awaited<ReturnType<typeof runAgentGeneration>>,
-  context: unknown,
-) {
+async function streamGeneration(stream: DataStreamWriter, generation: AgentGeneration, context: unknown) {
   /*
    * Two channels, and they must NOT be merged.
    *

@@ -105,12 +105,12 @@ describe('the union these tests are generated from', () => {
    */
   it('MEDIA_PROVIDERS is exactly KIE and FAL', () => {
     /*
-     * Comet was removed as a media gateway (owner, 2026-10-01: a security issue). It stays a PLATFORM
-     * provider — its LLM wiring is out of scope — so this is the one place both facts meet.
+     * Comet was removed as a media gateway on 2026-10-01 (a security issue) and as a platform provider on
+     * 2026-10-03 (`_specs/anthropic-only_plan.md`): KIE and fal are the only media paths, Anthropic the only LLM.
      */
     expect([...MEDIA_PROVIDERS]).toEqual(['KIE', 'FAL']);
     expect(MEDIA_PROVIDERS).not.toContain('Comet' as never);
-    expect(PLATFORM_PROVIDERS).toContain('Comet');
+    expect([...PLATFORM_PROVIDERS]).toEqual(['Anthropic']);
   });
 
   it('is non-empty and excludes Anthropic', () => {

@@ -1,34 +1,29 @@
 /**
- * 🔴 `getTierModel`'s PROVIDER OVERRIDE, DRIVEN — the one instrument that can see it work.
+ * 🔴 WHICH PRICE TABLE `getTierModel` VALIDATES A PAID RUNG AGAINST — driven.
  *
- * With `AUTO_MODEL_SELECT` the gateway is chosen PER REQUEST, so `proxy.ts` hands `config.provider`
- * to `getTierModel`. Dropping that argument returns the most expensive rung in the product to
- * validating itself against `LLM_PROVIDER`'s price table while a DIFFERENT gateway serves and bills
- * it — the `kieEnvModel` two-readers defect, on the money path, failing silently.
+ * Since 2026-10-03 (`_specs/anthropic-only_plan.md`) Anthropic is the ONLY LLM gateway:
+ * `getPlatformProvider` returns Anthropic whatever `LLM_PROVIDER` says (a stale value warns, never
+ * throws), and the override `proxy.ts` passes can only be `'Anthropic'`. The multi-gateway cases this
+ * file used to drive (KIE/Comet overrides) went with the gateways. What still has to hold: the rung is
+ * checked against ANTHROPIC'S table, a stale `LLM_PROVIDER` cannot re-route that check to another key,
+ * and the refusal names the provider and the rung's OWN selector.
  *
- * ## Why this file exists, and why it stubs one collaborator
+ * ## Why this file stubs one collaborator
  *
- * `model-tier-config.spec.ts` establishes — and PINS — that with the real rate tables the argument
- * cannot change the answer for any input: `providerRates` gap-fills every resolvable rung's model into
- * every provider's table (`rates.ts` `withTiers`), so an enabled rung prices everywhere by
- * construction, and a disabled or unpriceable one throws before the provider is read at all. The
- * implementation's own comment states this honestly and calls the override "a correctness floor, not a
- * wall".
+ * With the real rate tables an enabled rung's model is gap-filled into Anthropic's table
+ * (`rates.ts` `withTiers`), so the refusal path is unreachable for any real configuration. Observing
+ * WHICH key the function indexes means stubbing exactly one collaborator: `providerRates`. Everything
+ * else here is real, `getModelTier` included, so the rung is resolved by the same code the platform runs
+ * and only the table it is checked against is under this file's control.
  *
- * A floor still has to hold. What can be observed is the seam itself — WHICH provider's table the
- * function reaches for — and observing it means stubbing exactly one collaborator: `providerRates`.
- * Everything else here is real, `getModelTier` included, so the rung is resolved by the same code the
- * platform runs and only the table it is checked against is under this file's control.
- *
- * ⚠️ That makes this a test of a real code path with a stubbed dependency, NOT a test of the stub: the
- * assertions are about which key `getTierModel` uses to index the table it was handed, which is the
- * behaviour the argument exists for. It carries a CONTROL proving the stub is actually in force,
- * because a mock that silently stopped applying would leave every case below passing against the real
+ * ⚠️ That makes this a test of a real code path with a stubbed dependency, NOT a test of the stub. It
+ * carries CONTROLS proving the stub is actually in force and that every refusal is the table's doing,
+ * because a mock that silently stopped applying would leave every case passing against the real
  * gap-filled tables — green, and blind.
  *
  * ⚠️ `env()` falls back to `process.env` and Vitest loads `.env.local`, which on this owner's machine
- * sets `AUTO_MODEL_SELECT`, `LLM_PROVIDER`, `LLM_MODEL`, `PREMIUM_MODEL` and all three platform keys.
- * Every case scrubs the whole chain (the `oauth.spec.ts` trap).
+ * sets `AUTO_MODEL_SELECT`, `LLM_PROVIDER`, `LLM_MODEL`, `PREMIUM_MODEL` and the platform keys. Every
+ * case scrubs the whole chain (the `oauth.spec.ts` trap).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NotConfiguredError, getTierModel } from './config';
@@ -40,10 +35,10 @@ const RATE: ModelRates = { inputPerMTok: 2, outputPerMTok: 10, cacheReadPerMTok:
 /**
  * The stub, and the reason it SPREADS the original rather than replacing the module.
  *
- * `config.ts` also imports `getModelTier` and `kieDefaultModel` from here. A plain factory would delete
- * both — `getTierModel` would then fail for a reason that has nothing to do with the provider, and the
- * suite would be green on an assertion that never reached the line it names. Only `providerRates` is
- * replaced.
+ * `config.ts` also imports `getModelTier` and `nativeProviderRates` from here. A plain factory would
+ * delete them — `getTierModel` would then fail for a reason that has nothing to do with the price
+ * table, and the suite would be green on an assertion that never reached the line it names. Only
+ * `providerRates` is replaced.
  */
 const stub = vi.hoisted(() => ({ providerRates: vi.fn() }));
 
@@ -55,17 +50,18 @@ vi.mock('~/lib/.server/billing/rates', async (importOriginal) => ({
 /** The premium rung's default selector — resolved by the REAL `getModelTier` from the baked list. */
 const PREMIUM = 'claude-opus-5-5';
 
-/** Only KIE prices the rung. With the real tables this state is unreachable; that is the point. */
-const KIE_ONLY = {
+/**
+ * Anthropic does NOT price the rung; a stale `KIE` key in the table does. With the real tables this
+ * state is unreachable (`providerRates` returns Anthropic only since 2026-10-03), which is the point:
+ * it is the one fixture where validating against the wrong key would RESOLVE instead of refusing.
+ */
+const ANTHROPIC_UNPRICED = {
   Anthropic: { 'claude-sonnet-5': RATE },
   KIE: { 'claude-sonnet-5': RATE, [PREMIUM]: RATE },
-  Comet: { 'claude-sonnet-5': RATE },
 };
 
-const EVERYWHERE = {
+const ANTHROPIC_PRICED = {
   Anthropic: { [PREMIUM]: RATE },
-  KIE: { [PREMIUM]: RATE },
-  Comet: { [PREMIUM]: RATE },
 };
 
 /** The whole "which gateway / which model / which rung" precedence chain, plus every platform key. */
@@ -104,7 +100,7 @@ function stubEnv(vars: Partial<Record<string, string>> = {}) {
 }
 
 beforeEach(() => {
-  stub.providerRates.mockReturnValue(KIE_ONLY);
+  stub.providerRates.mockReturnValue(ANTHROPIC_UNPRICED);
 });
 
 afterEach(() => {
@@ -112,41 +108,40 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe('the override selects which price table validates the rung', () => {
-  it('validates against the OVERRIDE, not LLM_PROVIDER', () => {
-    stubEnv({ LLM_PROVIDER: 'Anthropic' });
-
-    expect(getTierModel('premium', {}, 'KIE')).toBe(PREMIUM);
-    expect(() => getTierModel('premium', {}), 'without the override it validates against Anthropic').toThrow(
-      NotConfiguredError,
-    );
-  });
-
+describe('the rung is validated against ANTHROPIC’S price table — the only LLM gateway', () => {
   /*
-   * The mirror image, and the one that costs real money: `LLM_PROVIDER` CAN price the rung, the gateway
-   * about to serve it cannot. Re-deriving here would return the model happily and hand it to a gateway
-   * whose table has no row for it — where `ratesFor` bills it at that table's most expensive row.
+   * 🔴 Since 2026-10-03 (`_specs/anthropic-only_plan.md`) `getPlatformProvider` ignores a non-Anthropic
+   * `LLM_PROVIDER` with a warning. The defect this guards is a stale `LLM_PROVIDER=KIE` re-routing the
+   * validation to a table keyed `KIE` — which in this fixture prices the rung — so a rung Anthropic
+   * cannot bill would resolve and then settle through `ratesFor`'s most-expensive fallback.
    */
-  it('refuses when the override cannot price the rung, even though LLM_PROVIDER could', () => {
-    stubEnv({ LLM_PROVIDER: 'KIE' });
+  it('a stale LLM_PROVIDER cannot route validation to another gateway’s table', () => {
+    for (const stale of ['KIE', 'Comet']) {
+      stubEnv({ LLM_PROVIDER: stale });
 
-    expect(getTierModel('premium', {})).toBe(PREMIUM);
-    expect(() => getTierModel('premium', {}, 'Comet')).toThrow(NotConfiguredError);
+      expect(() => getTierModel('premium', {}), `LLM_PROVIDER=${stale} must be ignored`).toThrow(NotConfiguredError);
+    }
   });
 
-  it('names the OVERRIDE provider in the refusal, so the operator fixes the right price list', () => {
+  it('refuses through the explicit override when Anthropic cannot price the rung', () => {
+    stubEnv();
+
+    expect(() => getTierModel('premium', {}, 'Anthropic')).toThrow(NotConfiguredError);
+  });
+
+  it('names Anthropic in the refusal, so the operator fixes the right price list', () => {
     stubEnv({ LLM_PROVIDER: 'KIE' });
 
     try {
-      getTierModel('premium', {}, 'Comet');
+      getTierModel('premium', {}, 'Anthropic');
       expect.unreachable('an unpriced rung must not resolve');
     } catch (error) {
       const message = (error as Error).message;
 
-      expect(message).toContain('Comet');
+      expect(message).toContain('Anthropic');
       expect(message).toContain(PREMIUM);
       expect(message, 'the rung’s OWN selector, never a hardcoded one').toContain('PREMIUM_MODEL');
-      expect(message, 'it must not blame the gateway that was never asked').not.toContain('KIE');
+      expect(message, 'it must not blame the gateway named by a stale setting').not.toContain('KIE');
     }
   });
 
@@ -155,10 +150,7 @@ describe('the override selects which price table validates the rung', () => {
    *
    * `getTierModel` builds its refusal from `definition.modelEnvKey`, and the case above checks the
    * message contains `PREMIUM_MODEL`. That passes identically for a hardcoded `'PREMIUM_MODEL'` string,
-   * because the rung under test IS premium — the two hypotheses are observationally identical on a
-   * one-paid-rung ladder, which is precisely why `model-tiers.ts` recorded this property as lost when
-   * SuperMax was retired and why `config.ts`'s own comment says a hardcoded name would be "wrong the
-   * moment a second rung returns". It returned on 2026-08-10 as PLATINUM.
+   * because the rung under test IS premium.
    *
    * A PLATINUM refusal is the discriminator: it must say `PLATINUM_MODEL` and must NOT say
    * `PREMIUM_MODEL`. The absence is the load-bearing half — naming the wrong variable sends an operator
@@ -166,10 +158,10 @@ describe('the override selects which price table validates the rung', () => {
    * stays dark.
    */
   it('a PLATINUM refusal names PLATINUM_MODEL and never the sibling rung’s selector', () => {
-    stubEnv({ LLM_PROVIDER: 'KIE' });
+    stubEnv();
 
     try {
-      getTierModel('platinum', {}, 'Comet');
+      getTierModel('platinum', {}, 'Anthropic');
       expect.unreachable('an unpriced rung must not resolve');
     } catch (error) {
       const message = (error as Error).message;
@@ -188,41 +180,33 @@ describe('the override selects which price table validates the rung', () => {
    *
    * `not.toContain('PREMIUM_MODEL')` is trivially satisfied by a refusal that throws before it ever
    * builds a message — a disabled rung, a missing definition, a typo in the tier id. This proves the
-   * platinum rung genuinely RESOLVES when its table prices it, so the refusal above is the price
+   * platinum rung genuinely RESOLVES when Anthropic's table prices it, so the refusal above is the price
    * table's doing and the message really was constructed.
    */
   it('CONTROL — platinum resolves when its model is priced, so the refusal is the table’s doing', () => {
-    stub.providerRates.mockReturnValue({
-      Anthropic: { [DEFAULT_PLATINUM_MODEL]: RATE },
-      KIE: { [DEFAULT_PLATINUM_MODEL]: RATE },
-      Comet: { [DEFAULT_PLATINUM_MODEL]: RATE },
-    });
-    stubEnv({ LLM_PROVIDER: 'KIE' });
-
-    expect(getTierModel('platinum', {}, 'Comet')).toBe(DEFAULT_PLATINUM_MODEL);
-  });
-
-  /* Omitting the argument behaves exactly as it did before the parameter existed. */
-  it('falls back to LLM_PROVIDER when no override is given', () => {
-    stubEnv({ LLM_PROVIDER: 'KIE' });
-
-    expect(getTierModel('premium', {})).toBe(getTierModel('premium', {}, 'KIE'));
-  });
-
-  it('and to the default provider when LLM_PROVIDER is unset', () => {
+    stub.providerRates.mockReturnValue({ Anthropic: { [DEFAULT_PLATINUM_MODEL]: RATE } });
     stubEnv();
 
-    expect(() => getTierModel('premium', {})).not.toThrow();
+    expect(getTierModel('platinum', {}, 'Anthropic')).toBe(DEFAULT_PLATINUM_MODEL);
+  });
+
+  /* Omitting the argument behaves exactly as passing the only gateway there is. */
+  it('the explicit Anthropic override and the fallback agree', () => {
+    stub.providerRates.mockReturnValue(ANTHROPIC_PRICED);
+    stubEnv({ LLM_PROVIDER: 'KIE' });
+
+    expect(getTierModel('premium', {})).toBe(getTierModel('premium', {}, 'Anthropic'));
+    expect(getTierModel('premium', {})).toBe(PREMIUM);
   });
 });
 
 /**
- * CONTROLS. Two of the assertions above are refusals, and a refusal passes for all sorts of wrong
+ * CONTROLS. The assertions above are mostly refusals, and a refusal passes for all sorts of wrong
  * reasons — a deleted export, a mock that stopped applying, a rung that was never enabled.
  */
-describe('CONTROLS — the stub is in force and the refusals are about the PROVIDER', () => {
+describe('CONTROLS — the stub is in force and the refusals are about the PRICE TABLE', () => {
   it('the stubbed providerRates is what getTierModel reads', () => {
-    stubEnv({ LLM_PROVIDER: 'Anthropic' });
+    stubEnv();
 
     expect(() => getTierModel('premium', {})).toThrow();
     expect(
@@ -233,26 +217,25 @@ describe('CONTROLS — the stub is in force and the refusals are about the PROVI
 
   /*
    * 🔴 THE CONTROL THAT MATTERS. Every refusal above must come from the TABLE, not from the rung being
-   * unresolvable in the first place: with the same environment and a table that prices the rung
-   * everywhere, every provider resolves. Without this, deleting the override entirely and always
-   * throwing would satisfy the two refusal cases.
+   * unresolvable in the first place: with the same environments and a table where Anthropic prices the
+   * rung, every case resolves. Without this, a getTierModel that always threw would satisfy the
+   * refusal cases.
    */
-  it('with every table priced, every provider resolves — so the refusals are the table’s doing', () => {
-    stub.providerRates.mockReturnValue(EVERYWHERE);
-    stubEnv({ LLM_PROVIDER: 'Anthropic' });
+  it('with Anthropic’s table priced, the same environments resolve — so the refusals are the table’s doing', () => {
+    stub.providerRates.mockReturnValue(ANTHROPIC_PRICED);
 
-    for (const provider of ['Anthropic', 'KIE', 'Comet'] as const) {
-      expect(getTierModel('premium', {}, provider)).toBe(PREMIUM);
+    for (const vars of [{}, { LLM_PROVIDER: 'KIE' }, { LLM_PROVIDER: 'Comet' }]) {
+      stubEnv(vars);
+
+      expect(getTierModel('premium', {}, 'Anthropic')).toBe(PREMIUM);
+      expect(getTierModel('premium', {})).toBe(PREMIUM);
     }
-
-    expect(getTierModel('premium', {})).toBe(PREMIUM);
   });
 
-  /* And the fixture really does isolate one provider, or the first two cases prove nothing. */
-  it('the fixture prices the rung on KIE alone', () => {
-    expect(KIE_ONLY.KIE).toHaveProperty(PREMIUM);
-    expect(KIE_ONLY.Anthropic).not.toHaveProperty(PREMIUM);
-    expect(KIE_ONLY.Comet).not.toHaveProperty(PREMIUM);
+  /* And the fixture really prices the rung on a key OTHER than Anthropic, or the first case proves nothing. */
+  it('the fixture prices the rung on the stale KIE key alone', () => {
+    expect(ANTHROPIC_UNPRICED.KIE).toHaveProperty(PREMIUM);
+    expect(ANTHROPIC_UNPRICED.Anthropic).not.toHaveProperty(PREMIUM);
   });
 
   /*

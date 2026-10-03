@@ -209,6 +209,98 @@ describe('(a) stale running legacy / enhancer rows', () => {
   });
 });
 
+describe('(a2) a dead MANAGED enhancement (managed-only plan D10)', () => {
+  /** A stale enhancer row naming a fake session that has served one request. */
+  async function staleEnhancement(id: string, status: 'idle' | 'running' = 'idle', withSession = true) {
+    const sessionId = `sesn_${id}`;
+
+    if (withSession) {
+      fake.seed(sessionId, [
+        {
+          type: 'span.model_request_end',
+          model_usage: {
+            input_tokens: 20_000,
+            output_tokens: 10_000,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+          },
+        },
+      ]).status = status;
+    }
+
+    await openRunningGeneration({
+      id,
+      userId: USER,
+      model: MODEL,
+      provider: 'Anthropic',
+      engine: 'enhancer',
+      statusKind: 'enhance',
+      managedSessionId: sessionId,
+    });
+
+    return sessionId;
+  }
+
+  it('prices the session, settles it interrupted (never refunded), archives it — once', async () => {
+    const sessionId = await staleEnhancement('gen_enh_dead');
+
+    await runBillingSweep(undefined, { now: later(16) });
+
+    const charged = await debits();
+
+    // Sonnet 5 at $2 in / $10 out per MTok: ($0.04 + $0.10) / $0.01 × 4, the documented formula.
+    expect(charged.map((e) => [e.generationId, e.delta])).toEqual([
+      ['gen_enh_dead', -Math.max(1, Math.ceil(((20_000 * 2 + 10_000 * 10) / 1_000_000 / 0.01) * 4))],
+    ]);
+    expect(await refunds()).toEqual([]);
+    expect(await row('gen_enh_dead')).toMatchObject({ status: 'interrupted', statusKind: 'enhance' });
+    expect(fake.archived).toEqual([sessionId]);
+
+    await runBillingSweep(undefined, { now: later(32) });
+    expect(await debits()).toHaveLength(1);
+  });
+
+  it('a session still running is interrupted and left for the next sweep (nothing billed yet)', async () => {
+    const sessionId = await staleEnhancement('gen_enh_running', 'running');
+
+    await runBillingSweep(undefined, { now: later(16) });
+
+    expect(await debits()).toEqual([]);
+    expect((await row('gen_enh_running')).status).toBe('running');
+    expect(fake.sends.flatMap((send) => (send.sessionId === sessionId ? send.events : []))).toEqual([
+      { type: 'user.interrupt' },
+    ]);
+  });
+
+  it('a session that no longer exists closes the row (it cannot be billed) and writes no ledger row', async () => {
+    await staleEnhancement('gen_enh_gone', 'idle', false);
+
+    await runBillingSweep(undefined, { now: later(16) });
+
+    expect(await debits()).toEqual([]);
+    expect((await row('gen_enh_gone')).status).toBe('interrupted');
+  });
+
+  it('CONTROL — a legacy enhancer row with no session still settles from its checkpoint', async () => {
+    await openRunningGeneration({
+      id: 'gen_enh_legacy',
+      userId: USER,
+      model: MODEL,
+      provider: 'Anthropic',
+      engine: 'enhancer',
+    });
+
+    const checkpointer = createUsageCheckpointer({ id: 'gen_enh_legacy' });
+    checkpointer.checkpoint(USAGE);
+    await checkpointer.flush();
+
+    await runBillingSweep(undefined, { now: later(16) });
+
+    expect((await debits()).map((e) => e.generationId)).toEqual(['gen_enh_legacy']);
+    expect(fake.archived).toEqual([]);
+  });
+});
+
 describe('(b) managed chats', () => {
   it('bills a chat whose session cost is above its cursor and has no turn in flight — once', async () => {
     const { chatId } = await managedChat(2);

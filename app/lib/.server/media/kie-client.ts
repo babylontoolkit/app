@@ -94,8 +94,8 @@ export class KieMediaProvider implements MediaProvider {
 
   /**
    * 🔴 EXPLICIT, never a fallthrough. `MediaEndpoint` is a shared PERSISTED vocabulary that now names
-   * another gateway's routes too, so "anything that is not veo is jobs" would quietly POST a Comet
-   * task to KIE's jobs endpoint — a debit taken, a task id that means nothing, and a poll that can
+   * another gateway's routes too, so "anything that is not veo is jobs" would quietly POST a fal or
+   * retired-gateway task to KIE's jobs endpoint — a debit taken, a task id that means nothing, and a poll that can
    * only ever time out. Refusing names the mismatch instead.
    */
   private _assertKieEndpoint(

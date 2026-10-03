@@ -17,7 +17,6 @@ import {
 } from 'ai';
 import { createScopedLogger } from '~/utils/logger';
 import { getActivePrompt } from '~/lib/.server/prompt/active';
-import { ensureCacheWarmer, PROMPT_CACHE_TTL, recordCacheRead } from '~/lib/.server/prompt/cache-warmer';
 import { getPromptStore } from '~/lib/.server/prompt/store';
 import {
   carriedReferenceIds,
@@ -246,6 +245,9 @@ export const MAX_REPAIR_TURNS = 2;
  * SDK passes `cacheControl` through verbatim, and an entry written this way is still a cache READ
  * seven minutes later — i.e. it is genuinely 1h and not a silent fall back to the 5m tier.
  */
+/** The ONE cache tier this (dormant, 2026-10-03) loop used — §4.2.8's 1h, because users stop to PLAY. */
+const PROMPT_CACHE_TTL = '1h' as const;
+
 const CACHE_CONTROL = { anthropic: { cacheControl: { type: 'ephemeral' as const, ttl: PROMPT_CACHE_TTL } } };
 
 /**
@@ -496,7 +498,7 @@ export interface AgentGeneration {
   model: string;
 
   /**
-   * The GATEWAY that served this turn — `KIE`, `Comet` or `Anthropic` (§4.2a).
+   * The GATEWAY that served this turn (§4.2a) — on this dormant loop, `Anthropic` only since 2026-10-03.
    *
    * Recorded for the same reason as `modelTier` beside it: once `AUTO_MODEL_SELECT` can pick a rung
    * per turn, "which model ran" no longer implies "who ran it", and the two gateways price the same
@@ -886,12 +888,6 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * and the prompt simply emits no block (§4.4d).
    */
   await ensureAssetLibraryForContext(request.context);
-
-  /*
-   * Same doorway, same posture: fire-and-forget, can never throw, keeps block 1 of every user's
-   * prompt reading at 0.1x instead of writing at 2x (`prompt/cache-warmer.ts`).
-   */
-  ensureCacheWarmer(request.context);
 
   /* Same doorway: the billing sweep (no-unbilled-usage D3). Lazily started, never throws, never blocks. */
   ensureBillingSweep(request.context);
@@ -3669,19 +3665,6 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        */
       const observedHandoffs = fallbackHandoffs.map((h) => `${h.from}→${h.to}`);
       const recordedHandoffs = observedHandoffs.length ? observedHandoffs : undefined;
-
-      /*
-       * Tell the cache warmer that ORGANIC traffic just warmed the shared prefix. Its next cycle then
-       * no-ops instead of paying a read to discover what this generation already did — which is what
-       * makes the warmer's steady-state cost proportional to how QUIET the platform is, rather than a
-       * flat toll it charges around the clock (`prompt/cache-warmer.ts` `shouldSkipWarmCycle`).
-       *
-       * Fire-and-forget and free: a module-level timestamp, no IO. It is deliberately stamped here
-       * rather than per-step — one read anywhere in the turn means the prefix is warm.
-       */
-      if (totals.cacheReadTokens > 0) {
-        recordCacheRead();
-      }
 
       /*
        * Enriches the row `settleGeneration` already anchored (it had to — the debit's foreign key

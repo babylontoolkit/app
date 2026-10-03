@@ -156,7 +156,11 @@ DOWN reads as a cheaper turn). The mechanism, in brief:
   finished step (`checkpoint_at`). BYOK turns write no running row (the user's key paid).
 - **The billing sweep** (`billing/sweep.ts`) bills what a dead process left behind: (a) a `running`
   legacy/enhancer row stale past `BILLING_SWEEP_STALE_MS` (default 15 min) and not in flight here →
-  settled from its last checkpoint as `interrupted`, never refunded; (b) every chat bound to a managed
+  settled from its last checkpoint as `interrupted`, never refunded — except a MANAGED enhancement (an
+  enhancer row naming a `managedSessionId`, `_specs/managed-only_plan.md` D10), which has no checkpoints and
+  is priced from its one-shot session instead (`agent-managed/enhance-settle.ts`: a running session is
+  interrupted and left for the next sweep; an idle one is settled `interrupted` and archived; a gone one
+  closes the row unbilled; an unreadable one stays `running` — never settled as zero); (b) every chat bound to a managed
   session active within `BILLING_SWEEP_MANAGED_WINDOW_MS` (default 7 days) whose session cost is above
   its cursor and has no turn in flight → a cursor settlement, plus every open billing orphan; (c) every
   pending-debit intent → debited once. Started from the request doorways (proxy, managed engine,
