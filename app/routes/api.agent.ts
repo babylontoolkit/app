@@ -28,6 +28,7 @@ import { withGenerationHeartbeat } from '~/lib/.server/agent/heartbeat';
 import { buildTurnAnnotations } from '~/lib/.server/agent/turn-annotations';
 import { NO_REPLAY, PLAN_MODE } from '~/types/message-marks';
 import { getMonitor } from '~/lib/.server/monitoring';
+import { keepAlive } from '~/lib/.server/runtime/keep-alive';
 import type { FileMap } from '~/lib/.server/llm/constants';
 import type { IProviderSetting } from '~/types/model';
 
@@ -344,11 +345,24 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
 
     const dataStream = createDataStream({
       async execute(stream) {
-        try {
-          await streamGeneration(stream, generation, context);
-        } finally {
-          releaseProject?.();
-        }
+        /*
+         * 🔴 THE DRIVER IS KEPT ALIVE PAST A DISCONNECT (`_specs/no-unbilled-usage_plan.md` D1, measured
+         * 2026-10-02). Under workerd a closed tab tears the request down and every pending promise stops —
+         * including this drain, which is what carries the generation to its settlement `finally`. Nothing
+         * throws; the turn is simply never billed. Registered with `waitUntil`, the drain keeps pulling,
+         * the abort (`enable_request_signal`) stops the provider, and the settlement lands.
+         */
+        await keepAlive(
+          context,
+          (async () => {
+            try {
+              await streamGeneration(stream, generation, context);
+            } finally {
+              releaseProject?.();
+            }
+          })(),
+          `generation ${generation.generationId}`,
+        );
       },
       onError: (error: any) => `Custom error: ${error?.message || 'Unknown error'}`,
     });

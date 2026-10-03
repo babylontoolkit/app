@@ -16,25 +16,32 @@ import { getObjectStore } from '~/lib/.server/storage';
 import { mediaBaseUrlFor, requireMediaKey } from '~/lib/.server/agent/config';
 import { mediaProviderFor } from '~/lib/.server/media/provider';
 import { pollMediaTask } from '~/lib/.server/media/service';
+import { keepAlive } from '~/lib/.server/runtime/keep-alive';
 
 export async function loader({ request, params, context }: LoaderFunctionArgs) {
   try {
     const user = await requireVerifiedUser(request, context);
     await requireOwnedProject(user, params.projectId!, context);
 
-    const task = await pollMediaTask({
-      projectId: params.projectId!,
-      taskId: params.taskId!,
-
-      /*
-       * 🔴 Resolved from the RECORD, not from `MEDIA_PROVIDER`. A poll must reach the gateway that
-       * issued the task id — an operator flipping the switch mid-render would otherwise strand every
-       * render in flight and eventually refund art that succeeded.
-       */
-      resolveProvider: (name) => mediaProviderFor(name, requireMediaKey(name, context), mediaBaseUrlFor(name, context)),
-      objectStore: getObjectStore(context),
+    /* Kept alive (no-unbilled-usage D1): a poll can settle a task — refund a failure, record a delivery. */
+    const task = await keepAlive(
       context,
-    });
+      pollMediaTask({
+        projectId: params.projectId!,
+        taskId: params.taskId!,
+
+        /*
+         * 🔴 Resolved from the RECORD, not from `MEDIA_PROVIDER`. A poll must reach the gateway that
+         * issued the task id — an operator flipping the switch mid-render would otherwise strand every
+         * render in flight and eventually refund art that succeeded.
+         */
+        resolveProvider: (name) =>
+          mediaProviderFor(name, requireMediaKey(name, context), mediaBaseUrlFor(name, context)),
+        objectStore: getObjectStore(context),
+        context,
+      }),
+      'media poll',
+    );
 
     if (!task) {
       // 404-not-403 everywhere an id could probe someone else's data (§4.5.3).

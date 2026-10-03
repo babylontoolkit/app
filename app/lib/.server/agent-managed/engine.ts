@@ -90,6 +90,7 @@ import {
   settleManagedTurn,
   shouldRefundManagedTurn,
 } from './settle';
+import { keepAlive } from '~/lib/.server/runtime/keep-alive';
 import { runManagedTurn, type ManagedTurnEnd, type ManagedTurnResult } from './turn';
 import { budgetAmountCents, ceilingUsdForCredits } from './usage';
 
@@ -753,28 +754,10 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
         });
       }
 
-      const settled = await settleManagedTurn({
-        client,
-        sessionId,
-        projectId,
-        chatId,
-        userId,
-        generationId,
-        model: servedModel,
-        statusKind,
-        sessionHourUsd: config.sessionHourUsd,
-        context: request.context,
-      });
-
-      usage.resolve(settled.usage);
-
-      /*
-       * D2 (`_specs/managed-billing-visibility_plan.md`): a detached session keeps running until it idles on
-       * a call no browser answers — bill that tail in the background instead of only at the chat's next
-       * settlement, which a chat nobody reopens never has. Fire-and-forget, never throws.
-       */
-      if (end === 'detached') {
-        void settleDetachedTail({
+      /* Kept alive (no-unbilled-usage D1): a workerd disconnect must not cancel the turn-end debit. */
+      const settled = await keepAlive(
+        request.context,
+        settleManagedTurn({
           client,
           sessionId,
           projectId,
@@ -785,9 +768,40 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
           statusKind,
           sessionHourUsd: config.sessionHourUsd,
           context: request.context,
-          waitMs: envNumber(request.context, 'MANAGED_DETACH_SETTLE_WAIT_MS', DETACH_SETTLE_WAIT_MS),
-          pollMs: envNumber(request.context, 'MANAGED_DETACH_SETTLE_POLL_MS', DETACH_SETTLE_POLL_MS),
-        });
+        }),
+        `managed settlement ${generationId}`,
+      );
+
+      usage.resolve(settled.usage);
+
+      /*
+       * D2 (`_specs/managed-billing-visibility_plan.md`): a detached session keeps running until it idles on
+       * a call no browser answers — bill that tail in the background instead of only at the chat's next
+       * settlement, which a chat nobody reopens never has. Fire-and-forget, never throws.
+       */
+      if (end === 'detached') {
+        /*
+         * Registered with the runtime (no-unbilled-usage D1): a detach IS a disconnect, and under workerd
+         * an unregistered fire-and-forget promise dies with the request — this tail would never run.
+         */
+        void keepAlive(
+          request.context,
+          settleDetachedTail({
+            client,
+            sessionId,
+            projectId,
+            chatId,
+            userId,
+            generationId,
+            model: servedModel,
+            statusKind,
+            sessionHourUsd: config.sessionHourUsd,
+            context: request.context,
+            waitMs: envNumber(request.context, 'MANAGED_DETACH_SETTLE_WAIT_MS', DETACH_SETTLE_WAIT_MS),
+            pollMs: envNumber(request.context, 'MANAGED_DETACH_SETTLE_POLL_MS', DETACH_SETTLE_POLL_MS),
+          }),
+          `detached tail ${generationId}`,
+        );
       }
 
       const refund =
@@ -800,7 +814,11 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
         });
 
       if (refund) {
-        await refundManagedTurn(userId, generationId, settled.settlement, request.context);
+        await keepAlive(
+          request.context,
+          refundManagedTurn(userId, generationId, settled.settlement, request.context),
+          `managed refund ${generationId}`,
+        );
       }
 
       const charged = settled.settlement && !refund ? settled.settlement.creditsCharged : 0;

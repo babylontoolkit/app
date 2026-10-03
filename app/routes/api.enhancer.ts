@@ -27,6 +27,7 @@ import { type ActionFunctionArgs } from '@remix-run/cloudflare';
 import { streamText } from '~/lib/.server/llm/stream-text';
 import { stripIndents } from '~/utils/stripIndent';
 import { getApiKeysFromCookie, getProviderSettingsFromCookie } from '~/lib/api/cookies';
+import { keepAlive } from '~/lib/.server/runtime/keep-alive';
 import { createScopedLogger } from '~/utils/logger';
 import { requireVerifiedUser } from '~/lib/.server/supabase/auth';
 import { resolveByok } from '~/lib/.server/licensing/entitlements';
@@ -182,106 +183,114 @@ async function enhancerAction({ context, request }: ActionFunctionArgs) {
      * Not awaited — the response has to start flowing to the browser now. Settlement can never refuse
      * and never throws, so nothing downstream depends on it finishing first. The enhancer sends no
      * cache-control, so there are no cache tokens to account for.
+     *
+     * 🔴 Registered with the runtime (`keepAlive`, no-unbilled-usage D1): "not awaited" under workerd
+     * means "cancelled when the response ends or the client goes" — measured 2026-10-02, a fire-and-forget
+     * promise stops with its request. Without the registration this settlement could simply never run.
      */
-    void (async () => {
-      let failed = false;
-      let producedText = false;
+    void keepAlive(
+      context,
+      (async () => {
+        let failed = false;
+        let producedText = false;
 
-      try {
-        for await (const part of result.fullStream) {
-          if (part.type === 'error') {
-            logger.error(`Enhancement ${generationId} stream error:`, part.error as any);
-            failed = true;
-            break;
+        try {
+          for await (const part of result.fullStream) {
+            if (part.type === 'error') {
+              logger.error(`Enhancement ${generationId} stream error:`, part.error as any);
+              failed = true;
+              break;
+            }
+
+            if (part.type === 'text-delta' && part.textDelta) {
+              producedText = true;
+            }
           }
-
-          if (part.type === 'text-delta' && part.textDelta) {
-            producedText = true;
-          }
+        } catch (error) {
+          logger.error(`Enhancement ${generationId} stream broke: ${(error as Error)?.message}`);
+          failed = true;
         }
-      } catch (error) {
-        logger.error(`Enhancement ${generationId} stream broke: ${(error as Error)?.message}`);
-        failed = true;
-      }
 
-      // No text is a failure however cheerfully the provider finished — the user got nothing.
-      if (!producedText) {
-        failed = true;
-      }
-
-      /*
-       * 🔴 BILL FROM THE STEPS, exactly as the proxy does — `result.usage` was reporting ZERO INPUT.
-       *
-       * Observed live 2026-08-11: a real enhancement settled `promptTokens: 0` against 335 output
-       * tokens, i.e. the ~600-token system prompt and the user's text were never billed at all. An
-       * under-charge, which is `rates.ts`' safe direction and precisely why it could sit here
-       * indefinitely without anything failing.
-       *
-       * `accumulateStepUsage` is the function settlement already trusts for every generation, and
-       * using it here buys three things a hand-rolled read cannot: the input tokens, the family-aware
-       * cache accounting (`promptTokensIncludeCacheRead`), and one place to fix the next surprise.
-       * The old code hardcoded `cacheReadTokens: 0` — true today because the enhancer sends no
-       * `cache_control`, and a claim rather than a measurement the moment that changes.
-       *
-       * ⚠️ Falls back to `result.usage` when there are no steps: settlement can never refuse (§4.6),
-       * so a shape this does not recognise must still bill SOMETHING rather than throw away the turn.
-       */
-      const usage = emptyUsage();
-
-      try {
-        const steps = await result.steps;
-
-        if (steps?.length) {
-          accumulateStepUsage(usage, steps as unknown as UsageStep[], familyOf(model) ?? undefined);
-        } else {
-          const combined = await result.usage;
-          usage.promptTokens = combined.promptTokens ?? 0;
-          usage.completionTokens = combined.completionTokens ?? 0;
-          usage.totalTokens = usage.promptTokens + usage.completionTokens;
+        // No text is a failure however cheerfully the provider finished — the user got nothing.
+        if (!producedText) {
+          failed = true;
         }
-      } catch (error) {
-        logger.error(`Failed to read enhancement usage for ${generationId}: ${(error as Error)?.message}`);
-        return;
-      }
-
-      const settlement = await settleGeneration({
-        userId: user.id,
-        generationId,
-        model,
-        provider,
-        usage,
 
         /*
-         * So the credits ledger names this turn instead of the generic "Generation" (§4.6). The
-         * display string is `ledger-display.ts`'s to choose — this only says what the turn WAS.
+         * 🔴 BILL FROM THE STEPS, exactly as the proxy does — `result.usage` was reporting ZERO INPUT.
+         *
+         * Observed live 2026-08-11: a real enhancement settled `promptTokens: 0` against 335 output
+         * tokens, i.e. the ~600-token system prompt and the user's text were never billed at all. An
+         * under-charge, which is `rates.ts`' safe direction and precisely why it could sit here
+         * indefinitely without anything failing.
+         *
+         * `accumulateStepUsage` is the function settlement already trusts for every generation, and
+         * using it here buys three things a hand-rolled read cannot: the input tokens, the family-aware
+         * cache accounting (`promptTokensIncludeCacheRead`), and one place to fix the next surprise.
+         * The old code hardcoded `cacheReadTokens: 0` — true today because the enhancer sends no
+         * `cache_control`, and a claim rather than a measurement the moment that changes.
+         *
+         * ⚠️ Falls back to `result.usage` when there are no steps: settlement can never refuse (§4.6),
+         * so a shape this does not recognise must still bill SOMETHING rather than throw away the turn.
          */
-        statusKind: 'enhance',
-        byok: byok.allowed,
-        context,
-      });
+        const usage = emptyUsage();
 
-      if (!failed) {
-        return;
-      }
+        try {
+          const steps = await result.steps;
 
-      /*
-       * The provider still billed US for whatever a broken enhancement burned; the user gets their
-       * credits back and the row says `failed`, so the §4.10 refund audit can see it.
-       */
-      if (settlement && settlement.creditsCharged > 0) {
-        await refundGeneration(
-          user.id,
+          if (steps?.length) {
+            accumulateStepUsage(usage, steps as unknown as UsageStep[], familyOf(model) ?? undefined);
+          } else {
+            const combined = await result.usage;
+            usage.promptTokens = combined.promptTokens ?? 0;
+            usage.completionTokens = combined.completionTokens ?? 0;
+            usage.totalTokens = usage.promptTokens + usage.completionTokens;
+          }
+        } catch (error) {
+          logger.error(`Failed to read enhancement usage for ${generationId}: ${(error as Error)?.message}`);
+          return;
+        }
+
+        const settlement = await settleGeneration({
+          userId: user.id,
           generationId,
-          settlement.creditsCharged,
-          'Automatic refund — the prompt enhancement failed',
-          context,
-        );
-      }
+          model,
+          provider,
+          usage,
 
-      await getGenerationStore(context)
-        .upsert({ id: generationId, userId: user.id, model, status: 'failed' })
-        .catch(() => undefined);
-    })();
+          /*
+           * So the credits ledger names this turn instead of the generic "Generation" (§4.6). The
+           * display string is `ledger-display.ts`'s to choose — this only says what the turn WAS.
+           */
+          statusKind: 'enhance',
+          byok: byok.allowed,
+          context,
+        });
+
+        if (!failed) {
+          return;
+        }
+
+        /*
+         * The provider still billed US for whatever a broken enhancement burned; the user gets their
+         * credits back and the row says `failed`, so the §4.10 refund audit can see it.
+         */
+        if (settlement && settlement.creditsCharged > 0) {
+          await refundGeneration(
+            user.id,
+            generationId,
+            settlement.creditsCharged,
+            'Automatic refund — the prompt enhancement failed',
+            context,
+          );
+        }
+
+        await getGenerationStore(context)
+          .upsert({ id: generationId, userId: user.id, model, status: 'failed' })
+          .catch(() => undefined);
+      })(),
+      `enhancement settlement ${generationId}`,
+    );
 
     // Return the text stream directly since it's already text data
     return new Response(result.textStream, {

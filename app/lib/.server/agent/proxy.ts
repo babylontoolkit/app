@@ -76,6 +76,7 @@ import type { IProviderSetting } from '~/types/model';
 import type { AuthUser } from '~/lib/.server/supabase/auth';
 import { resolveByok } from '~/lib/.server/licensing/entitlements';
 import { checkCreditGate, refundGeneration, settleGeneration } from '~/lib/.server/billing/gate';
+import { keepAlive } from '~/lib/.server/runtime/keep-alive';
 import { creditsForRawCost, getBillingConfigSafe, getModelTiers, rawCostUsd } from '~/lib/.server/billing/rates';
 import { ensureMarketPrices, marketPriceProvidersFor } from '~/lib/.server/billing/market-price-store';
 import { activeAssetLibrary, ensureAssetLibraryForContext } from '~/lib/.server/assets/library-store';
@@ -3446,25 +3447,34 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        * has already billed us for them, so `totals` is what was actually spent, and the ledger records
        * exactly that — never the full estimate the generation would have cost had it finished.
        */
-      const settlement = await settleGeneration({
-        userId: user.id,
-        generationId,
-        model,
+      /*
+       * Kept alive (no-unbilled-usage D1): under workerd a client disconnect cancels the request's pending
+       * work. `/api/agent` already keeps the whole drain alive; registering the debit and its refund here
+       * too means no caller of `runAgentGeneration` can lose them to a disconnect.
+       */
+      const settlement = await keepAlive(
+        request.context,
+        settleGeneration({
+          userId: user.id,
+          generationId,
+          model,
 
-        // The provider that ACTUALLY served this generation — it decides the rates (`ratesFor`).
-        provider: config.provider,
-        usage: totals,
-        byok: useByok,
+          // The provider that ACTUALLY served this generation — it decides the rates (`ratesFor`).
+          provider: config.provider,
+          usage: totals,
+          byok: useByok,
 
-        /*
-         * NO `flatCredits`, NO `maxCredits` — every turn settles cost-derived, including the first
-         * build (§4.4a, 2026-07-29). The flat price it used to carry moved to project REGISTRATION,
-         * where it is charged once under its own ledger reason (`project_create`) before any
-         * generation exists. `decideCredits` keeps both levers, pure and tested, with no caller here:
-         * ceasing to pass them is the pricing decision, deleting them would throw the capability away.
-         */
-        context: request.context,
-      });
+          /*
+           * NO `flatCredits`, NO `maxCredits` — every turn settles cost-derived, including the first
+           * build (§4.4a, 2026-07-29). The flat price it used to carry moved to project REGISTRATION,
+           * where it is charged once under its own ledger reason (`project_create`) before any
+           * generation exists. `decideCredits` keeps both levers, pure and tested, with no caller here:
+           * ceasing to pass them is the pricing decision, deleting them would throw the capability away.
+           */
+          context: request.context,
+        }),
+        `settlement ${generationId}`,
+      );
 
       /*
        * AUTO-REFUND on a hard failure (§4.6).
@@ -3476,12 +3486,16 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        * balance comes out right.
        */
       if (failed && settlement && settlement.creditsCharged > 0) {
-        await refundGeneration(
-          user.id,
-          generationId,
-          settlement.creditsCharged,
-          'Automatic refund — the generation failed',
+        await keepAlive(
           request.context,
+          refundGeneration(
+            user.id,
+            generationId,
+            settlement.creditsCharged,
+            'Automatic refund — the generation failed',
+            request.context,
+          ),
+          `refund ${generationId}`,
         );
       }
 
@@ -3759,7 +3773,11 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
       cancelGenerationToolCalls(generationId);
 
       // Bridge jobs still QUEUED when the generation ends never ran — mark them cancelled. Started ones continue.
-      void settleDropped(cancelGenerationBridgeJobs(generationId), request.context).catch(() => undefined);
+      void keepAlive(
+        request.context,
+        settleDropped(cancelGenerationBridgeJobs(generationId), request.context),
+        `bridge cleanup ${generationId}`,
+      ).catch(() => undefined);
     }
   }
 

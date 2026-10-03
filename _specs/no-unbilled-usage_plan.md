@@ -82,7 +82,7 @@ Also: web search debits AFTER the vendor is paid and only logs a failed debit (`
 
 ## Tasks
 
-- [ ] **T1 — Measure G10 + `keepAlive`.** Run the production server shape (`pnpm build` then the
+- [x] **T1 — Measure G10 + `keepAlive`.** Run the production server shape (`pnpm build` then the
   package's `wrangler pages dev` start script) on a spare port; a tiny probe route (dev-only, removed after)
   or a real `/api/agent` legacy turn; disconnect mid-stream; observe (a)–(c) of D1 from logs. Add
   `app/lib/.server/runtime/keep-alive.ts` (`keepAlive(context, promise)` → `waitUntil` when present, else
@@ -118,4 +118,35 @@ Also: web search debits AFTER the vendor is paid and only logs a failed debit (`
 
 ## Findings
 
-(T1 measurements go here.)
+**T1 — G10 measured, 2026-10-02.** Production shape run locally: `pnpm build`, then `wrangler pages dev
+./build/client --port 8799` (wrangler 4.44.0, workerd, `compatibility_date = "2025-03-28"`) with the
+`.env.local` bindings. A temporary probe route streamed one chunk every 500 ms for 10 s; `curl -N` was killed
+after ~1.6 s. workerd noticed the disconnect ~1–1.5 s later (on the next enqueue).
+
+| Observed after a mid-stream client disconnect | `nodejs_compat` only (as shipped) | + `enable_request_signal` |
+|---|---|---|
+| (a) `request.signal` fires | **No** — never | **Yes** — ~1 s after the disconnect |
+| (b) a loop's `finally` after the stream (the shape of the proxy's settlement `finally`) | **No** — never runs | **No** — never runs |
+| (c) fire-and-forget promise (3 s) / `setTimeout` (5 s), with nothing registered via `waitUntil` | **No** — both stop with the request; logging stops entirely | **No** — same |
+| (d) work registered via `context.cloudflare.ctx.waitUntil` (3 s, 5 s, 12 s; one run 75 s) | **Yes** — all ran | **Yes** — all ran |
+| (b)/(c) while a `waitUntil` promise is still outstanding | **Yes** — the whole request context stays alive, so the loop `finally` and the fire-and-forget work run too | **Yes** — and the loop saw the abort at once |
+
+- `context.cloudflare.ctx.waitUntil` is present in the production load context (Remix's
+  `createPagesFunctionHandler` builds it) — no change to `functions/[[path]].ts` / `getLoadContext` needed.
+- Even with NO disconnect, a probe's async work finishing at the same moment as the response body was cut off
+  (its `finally` never logged): work that outlives the response is not safe without `waitUntil` either.
+- Settlement-shaped probe (the route's exact driver: `ai@4` `createDataStream` + async generator whose
+  `finally` does an outbound HTTP write, like a Supabase/PostgREST ledger insert), killed at 1.2 s:
+  without `keepAlive` → signal fired, `finally` **never ran, no row**; with `keepAlive` → `finally` ran and
+  the row **landed** (`{"keep":true,"aborted":true}`); `keepAlive` without the flag → the generator ran to its
+  natural end (10 s, i.e. a closed tab would run the whole turn) and then wrote the row (`aborted:false`).
+- Local mode cannot run under workerd: `node:fs` is the unenv stub (`[unenv] fs.mkdir is not implemented
+  yet!` on `/api/me`; the FS stores resolve to `/.data`). So no real `/api/agent` turn can be driven under the
+  production shape without Supabase; production uses Supabase + S3, which are HTTP and behave like the probe.
+- Real legacy Plan-mode turn on the Node dev server (Sonnet), disconnected mid-stream: the settlement ran and
+  the ledger row landed (`gen_mus4epkz_uvjzlo`, 4 credits, step 1 only). A disconnect during the FIRST step
+  settled `0` tokens (`gen_mus4ds59_j53vjt`, 61 text chunks already streamed) — the in-flight step is
+  unbilled, which is G7 / T7, not G10.
+- Not measured: whether self-hosted workerd caps `waitUntil` for the 30-min detached-tail wait (75 s
+  measured fine; hosted Cloudflare would cap at ~30 s after the response).
+

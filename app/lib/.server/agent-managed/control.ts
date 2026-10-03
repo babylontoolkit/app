@@ -16,6 +16,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { envNumber } from '~/lib/.server/env';
 import { isServerChatId } from '~/lib/persistence/chat-id';
+import { keepAlive } from '~/lib/.server/runtime/keep-alive';
 import { createScopedLogger } from '~/utils/logger';
 import { getChatIndex } from '~/lib/.server/projects/chat-index';
 import { NotFoundError } from '~/lib/.server/projects/ownership';
@@ -152,15 +153,23 @@ export async function interruptManagedTurn(input: {
   await client.beta.sessions.events.send(sessionId, { events: [{ type: 'user.interrupt' }] });
 
   if (input.userId) {
-    const tail = settleStoppedTail({
-      client,
-      sessionId,
-      projectId: input.projectId,
-      chatId: input.chatId as string,
-      userId: input.userId,
-      context: input.context,
-      pollMs: input.pollMs,
-    });
+    /*
+     * Registered with the runtime (no-unbilled-usage D1): the Stop route answers immediately, and under
+     * workerd an unregistered promise stops when its request ends — the stopped turn's tail would never bill.
+     */
+    const tail = keepAlive(
+      input.context,
+      settleStoppedTail({
+        client,
+        sessionId,
+        projectId: input.projectId,
+        chatId: input.chatId as string,
+        userId: input.userId,
+        context: input.context,
+        pollMs: input.pollMs,
+      }),
+      `stop tail ${sessionId}`,
+    );
 
     if (input.waitForSettlement) {
       await tail;

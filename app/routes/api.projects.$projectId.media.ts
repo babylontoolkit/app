@@ -22,6 +22,7 @@ import { ensureMarketPrices } from '~/lib/.server/billing/market-price-store';
 import { mediaProviderFor } from '~/lib/.server/media/provider';
 import { listMediaTasks } from '~/lib/.server/media/store';
 import { MediaRefusedError, quoteMediaRequest, startMediaTask } from '~/lib/.server/media/service';
+import { keepAlive } from '~/lib/.server/runtime/keep-alive';
 import { validatePanelSoundRequest } from '~/lib/media/sound-request';
 
 interface MediaActionBody {
@@ -121,15 +122,24 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
         );
       }
 
-      const started = await startMediaTask({
-        ...mediaRequest,
-        userId: user.id,
-        projectId: params.projectId!,
-        fileName: body.fileName,
-        provider: mediaProviderFor(media.provider, media.apiKey, media.baseUrl),
-        objectStore: getObjectStore(context),
+      /*
+       * Kept alive (no-unbilled-usage D1): debit → provider create → task record must finish together. Under
+       * workerd a client that goes away mid-request cancels the pending work, which could leave a debit
+       * with no task or — worse — a render the provider accepted with no record to bill or refund it.
+       */
+      const started = await keepAlive(
         context,
-      });
+        startMediaTask({
+          ...mediaRequest,
+          userId: user.id,
+          projectId: params.projectId!,
+          fileName: body.fileName,
+          provider: mediaProviderFor(media.provider, media.apiKey, media.baseUrl),
+          objectStore: getObjectStore(context),
+          context,
+        }),
+        'media start',
+      );
 
       return json({ ok: true, ...started });
     }
