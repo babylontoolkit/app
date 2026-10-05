@@ -410,3 +410,51 @@ describe('ModelTierPill — the first-build lock', () => {
     expect(pill().getAttribute('title')).not.toMatch(/first build/i);
   });
 });
+
+/*
+ * A paid rung the server refuses (`serveable: false`) makes "no choice" for a different reason than a
+ * deploy that deliberately serves one model, and the tooltip must not blur the two. Measured 2026-10-04:
+ * a stale `ENABLE_PREMIUM_MODEL=true` refused both paid rungs, the pill became a plain label saying
+ * "the model this platform serves", and the owner read it as model selection being broken in code.
+ */
+describe('ModelTierPill — configured rungs the server cannot serve', () => {
+  const withPaid = (serveable: boolean): SessionState => ({
+    ...funded,
+    credits: {
+      ...funded.credits,
+      modelTiers: {
+        ...funded.credits.modelTiers,
+        tiers: [
+          funded.credits.modelTiers.tiers[0],
+          { ...funded.credits.modelTiers.tiers[1], serveable, available: serveable },
+          {
+            id: 'platinum',
+            label: 'Platinum',
+            model: 'claude-fable-5',
+            minimumCredits: 1_500,
+            available: serveable,
+            serveable,
+          },
+        ],
+      },
+    },
+  });
+
+  it('says the paid rungs are unavailable, not that the platform serves one model', () => {
+    sessionStore.set(withPaid(false));
+    render(<ModelTierPill />);
+
+    const title = pill().getAttribute('title') ?? '';
+    expect(title).toContain("Premium and Platinum aren't available right now");
+    expect(title).not.toMatch(/the model this platform serves/);
+  });
+
+  it('CONTROL — serveable paid rungs keep the picker and its ordinary tooltip', () => {
+    sessionStore.set(withPaid(true));
+    render(<ModelTierPill />);
+
+    expect(pill().getAttribute('title')).toMatch(/Click to choose a different model/);
+    fireEvent.click(pill());
+    expect(modelTierPanelOpen.get()).toBe(true);
+  });
+});

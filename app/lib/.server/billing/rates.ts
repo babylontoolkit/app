@@ -16,6 +16,7 @@
  * | output         | 5x (model-specific)    | what the model writes                                  |
  */
 import { env, envFlag, envNumber, NotConfiguredError } from '~/lib/.server/env';
+import { createScopedLogger } from '~/utils/logger';
 import { modelTierEnabled, extendedModelsEnabled, refuseRetiredModelTierEnv } from './premium-model-flag';
 import type { MarketPriceList } from './market-prices';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
@@ -449,6 +450,19 @@ export interface ModelTierStatus {
  * import that module — the cycle documented at `mostExpensive` below. Its callers already hold the
  * standard model, guarded, for exactly this reason.
  */
+const tierLogger = createScopedLogger('model-tiers');
+
+/**
+ * Reasons already logged by `getModelTiers`, so a broken rung warns once per process, not on every
+ * `/api/me` (every page load).
+ *
+ * 🔴 The warning is the only place the reason surfaces. A rung reported `serveable: false` simply
+ * vanishes from the picker, and when it is the LAST paid rung the pill stops being a control at all.
+ * Measured 2026-10-04: a stale `ENABLE_PREMIUM_MODEL=true` refused both paid rungs and the only symptom
+ * was "stuck on Sonnet, the picker won't open", with nothing in any log.
+ */
+const warnedTierReasons = new Set<string>();
+
 export function getModelTiers(standardModel: string, context?: unknown): ModelTierStatus[] {
   const standard: ModelTierStatus = {
     id: 'standard',
@@ -493,6 +507,14 @@ export function getModelTiers(standardModel: string, context?: unknown): ModelTi
           serveable: true,
         };
       } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        const key = `${definition.id}:${reason}`;
+
+        if (!warnedTierReasons.has(key)) {
+          warnedTierReasons.add(key);
+          tierLogger.warn(`The ${definition.label} model tier cannot be served, so the picker hides it: ${reason}`);
+        }
+
         /*
          * The threshold is still readable — `envNumber` cannot throw — so the locked rung can still
          * state what it WOULD cost to unlock. Only the model half is in doubt, and that reports as the
@@ -506,7 +528,7 @@ export function getModelTiers(standardModel: string, context?: unknown): ModelTi
           minimumCredits: envNumber(context, definition.minimumEnvKey, definition.defaultMinimumCredits),
           firstBuildLocked: definition.firstBuildLocked,
           serveable: false,
-          reason: error instanceof Error ? error.message : String(error),
+          reason,
         };
       }
     },

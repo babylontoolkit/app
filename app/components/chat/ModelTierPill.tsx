@@ -91,9 +91,18 @@ export function ModelTierPill() {
    */
   const choosable = hasModelChoice(tiers);
 
+  /*
+   * Paid rungs that exist but cannot be served. When they are why there is "no choice", the tooltip must
+   * not claim the deploy offers one model on purpose: that sentence hid a misconfiguration that disabled
+   * the picker for every user (2026-10-04). The operator's detail is in the server log (`model-tiers`).
+   */
+  const unserveable = tiers.filter((tier) => tier.id !== 'standard' && !tier.serveable).map((tier) => tier.label);
+
   // Version detail lives here (the pill shows only the family): "Fable 5", "Opus 4.8".
   const title = !choosable
-    ? `Running ${effective.full} — the model this platform serves.`
+    ? unserveable.length
+      ? `Running ${effective.full}. ${unserveable.join(' and ')} ${unserveable.length > 1 ? "aren't" : "isn't"} available right now.`
+      : `Running ${effective.full} — the model this platform serves.`
     : locked
       ? `Running ${effective.full}. ${selectedLabel} is not available right now. Click to change.`
       : `Running ${effective.full} (${selectedLabel}). Click to choose a different model.`;
