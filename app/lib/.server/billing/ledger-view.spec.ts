@@ -234,6 +234,24 @@ describe('buildLedgerView savings', () => {
   });
 
   /*
+   * 🔴 AN ANTHROPIC-SERVED TURN SAVED NOTHING (owner, 2026-10-04). Every managed turn records provider
+   * `Anthropic` and a raw cost that prices cache writes at the 5-minute tier, below the reference
+   * formula's 1-hour tier — so the ratio printed a "saving" from Anthropic against Anthropic. Same cheap
+   * recorded cost as the Comet fixture above; the only difference is who served it.
+   */
+  it('claims no saving on a turn Anthropic served, even when its recorded cost is below the reference', () => {
+    const charged = 80;
+    const view = buildLedgerView(
+      [entry({ id: 'e-debit', delta: -charged, reason: 'generation', generationId: 'g-1' })],
+      [gen('g-1', { provider: 'Anthropic', engine: 'managed' })],
+    );
+
+    expect(view.rows[0].savedCredits).toBeUndefined();
+    expect(view.rows[0].savedPercent).toBeUndefined();
+    expect(view.savings).toEqual({ savedCredits: 0, referenceCredits: charged, percent: 0, comparedRows: 1 });
+  });
+
+  /*
    * 🔴 THE LEDGER'S NUMBER, NOT THE GENERATION'S. They should agree; when they do not, the ledger row
    * is the one that moved the user's balance, and a saving derived from the other number describes a
    * charge that never happened. The fixture makes them disagree by an order of magnitude so a swap

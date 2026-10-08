@@ -206,6 +206,38 @@ describe('describeSavings says nothing rather than something false', () => {
  * their credits went — for a stale line in an env file. The module now reads a MODULE CONSTANT, so the
  * failure is not merely unlikely, it is inexpressible.
  */
+describe('describeSavings never claims a discount for a turn Anthropic itself served', () => {
+  const usage: TokenUsage = {
+    promptTokens: 1_000,
+    completionTokens: 2_000,
+    cacheReadTokens: 50_000,
+    cacheCreationTokens: 9_000,
+  };
+  const model = 'claude-opus-5';
+  const list = costForRates(usage, MODEL_RATES[model]);
+
+  /* A managed turn's real cost: cache writes at the 5-minute tier, so BELOW the 1-hour-tier reference. */
+  const managedCost = list * 0.9;
+
+  it('Anthropic → full price, nothing saved (the reference IS this gateway)', () => {
+    expect(
+      describeSavings({ usage, model, actualCostUsd: managedCost, creditsCharged: 100, provider: 'Anthropic' }),
+    ).toEqual({
+      basis: 'full_price',
+      referenceCredits: 100,
+      savedCredits: 0,
+      percent: 0,
+    });
+  });
+
+  it('CONTROL: the same numbers on another gateway still report its discount', () => {
+    const other = describeSavings({ usage, model, actualCostUsd: managedCost, creditsCharged: 100, provider: 'KIE' });
+
+    expect(other?.basis).toBe('saved');
+    expect(other?.savedCredits).toBeGreaterThan(0);
+  });
+});
+
 describe('describeSavings is PURE, so a stale env var cannot 503 the credits panel', () => {
   it('answers normally while a RETIRED price variable is set', () => {
     vi.stubEnv('KIE_INPUT_DOLLARS', '2');

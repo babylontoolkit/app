@@ -27,6 +27,7 @@ import {
   deliveryNote,
   PROGRESS_CAP,
   DELIVERY_NOTE_AFTER_MS,
+  formatCreditsSoFar,
 } from './agent-status';
 
 function part(overrides: Record<string, unknown> = {}) {
@@ -708,19 +709,22 @@ describe('the observed step (managed engine)', () => {
 describe('the live credit estimate (managed-billing-visibility D1)', () => {
   beforeEach(() => resetAgentStatus());
 
-  it('keeps creditsSoFar and shows it as an estimate', () => {
+  /*
+   * Hidden (owner, 2026-10-04): the first build's TOTAL is shown once on the "Build complete" banner
+   * instead of a running counter. The store still keeps the server's estimate.
+   */
+  it('keeps creditsSoFar but does NOT show a running cost in the panel', () => {
     updateAgentStatus(part({ step: 'Thinking', stepElapsedMs: 1000, creditsSoFar: 1234 }), 1000);
 
     const status = agentStatusStore.get()!;
 
     expect(status.creditsSoFar).toBe(1234);
-    expect(describeAgentStatus(status, 1000).cost).toBe('~1,234 credits so far');
+    expect(describeAgentStatus(status, 1000).cost).toBeUndefined();
   });
 
-  it('one credit is singular', () => {
-    updateAgentStatus(part({ creditsSoFar: 1 }), 1000);
-
-    expect(describeAgentStatus(agentStatusStore.get()!, 1000).cost).toBe('~1 credit so far');
+  it('the formatter still labels it as an estimate, singular for one', () => {
+    expect(formatCreditsSoFar(1234)).toBe('~1,234 credits so far');
+    expect(formatCreditsSoFar(1)).toBe('~1 credit so far');
   });
 
   it('CONTROL: absent (legacy), zero or junk → no cost line', () => {

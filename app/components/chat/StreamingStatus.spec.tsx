@@ -238,7 +238,7 @@ describe('StreamingStatus — sounds in the render line', () => {
 });
 
 describe('StreamingStatus — the live credit estimate (managed-billing-visibility D1)', () => {
-  it('shows ~N credits so far beside the step, in tabular figures', () => {
+  it('does NOT show a running cost, even when the server sends an estimate (owner, 2026-10-04)', () => {
     updateAgentStatus({
       type: 'agent-status',
       generationId: 'gen-1',
@@ -251,10 +251,7 @@ describe('StreamingStatus — the live credit estimate (managed-billing-visibili
     });
     render(<StreamingStatus />);
 
-    const cost = screen.getByText(/~312 credits so far/);
-
-    expect(cost).toBeInTheDocument();
-    expect(cost.className).toContain('tabular-nums');
+    expect(screen.queryByText(/credits so far/)).toBeNull();
     expect(screen.getByText(/Thinking ·/)).toBeInTheDocument();
   });
 

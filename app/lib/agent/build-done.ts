@@ -15,11 +15,15 @@
  */
 import { parseCreationPhasesCompleted } from './creation-plan';
 
-export type BuildDoneBanner = { state: 'ready' } | { state: 'unverified' };
+/**
+ * `credits` is what creating the project cost in total — create fee, build turns and renders, net of refunds
+ * (owner, 2026-10-04: one total at the end instead of a running counter). Absent when the server sent none.
+ */
+export type BuildDoneBanner = { state: 'ready' | 'unverified'; credits?: number };
 
 interface AnnotationLike {
   type?: unknown;
-  value?: { creationPhasesCompleted?: unknown; outcome?: { state?: unknown } } | null;
+  value?: { creationPhasesCompleted?: unknown; creationCredits?: unknown; outcome?: { state?: unknown } } | null;
 }
 
 export function decideBuildDoneBanner(annotations: readonly unknown[] | undefined): BuildDoneBanner | null {
@@ -33,11 +37,22 @@ export function decideBuildDoneBanner(annotations: readonly unknown[] | undefine
   }
 
   const state = meta?.value?.outcome?.state;
+  const raw = meta?.value?.creationCredits;
+  const cost = typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? { credits: Math.round(raw) } : {};
 
   /* Only these two describe a build that ran to its end; anything else is not a "done" moment. */
   if (state === undefined || state === 'finished' || state === 'rescued') {
-    return { state: 'ready' };
+    return { state: 'ready', ...cost };
   }
 
-  return state === 'unverified' ? { state: 'unverified' } : null;
+  return state === 'unverified' ? { state: 'unverified', ...cost } : null;
+}
+
+/** "Creating this project cost 1,234 credits in total." — nothing when no total was recorded. */
+export function formatCreationCost(credits: number | undefined): string | undefined {
+  if (credits === undefined) {
+    return undefined;
+  }
+
+  return `Creating this project cost ${credits.toLocaleString('en-US')} credit${credits === 1 ? '' : 's'} in total.`;
 }

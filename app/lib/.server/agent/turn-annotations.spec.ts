@@ -77,6 +77,27 @@ describe('buildTurnAnnotations', () => {
     });
   });
 
+  it('MANAGED first build: carries the creation total beside the phases (owner, 2026-10-04)', () => {
+    const a = buildTurnAnnotations(
+      { ...GENERATION, engine: 'managed' },
+      { ...FACTS, creationPhasesCompleted: ['design', 'game', 'frontend'], creationCredits: 1234 },
+    );
+
+    expect(a.agentMeta.value.creationCredits).toBe(1234);
+  });
+
+  it('CONTROL: no total without a finished build, and none when the total was unreadable', () => {
+    const noBuild = buildTurnAnnotations(GENERATION, { ...FACTS, creationCredits: 1234 });
+    const unreadable = buildTurnAnnotations(GENERATION, {
+      ...FACTS,
+      creationPhasesCompleted: ['design'],
+      creationCredits: null,
+    });
+
+    expect('creationCredits' in noBuild.agentMeta.value).toBe(false);
+    expect('creationCredits' in unreadable.agentMeta.value).toBe(false);
+  });
+
   it('carries the SERVED effort when the generation has one, after tierReason; absent when unknown (D9)', () => {
     const a = buildTurnAnnotations({ ...GENERATION, effort: 'xhigh' }, FACTS);
 

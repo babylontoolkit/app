@@ -479,6 +479,12 @@ const SHOW_EXPECTATION_CAPTION = false;
 const SHOW_SILENCE_CLAUSE = false;
 
 /**
+ * Hidden (owner, 2026-10-04): the running "~N credits so far" beside the step. The first build's TOTAL is
+ * shown once on the "Build complete" banner instead (`build-done.ts`). Still computed; flip to bring it back.
+ */
+const SHOW_RUNNING_COST = false;
+
+/**
  * Honest by design: it never pretends to BE the reasoning (when a provider streams real thinking text,
  * the ThinkingPanel shows it and this panel never appears), and it answers the two questions dead dots
  * cannot — "is it doing something, or is it frozen?" and "doing WHAT?".
@@ -619,7 +625,7 @@ export function describeAgentStatus(
         ? copy.thinking
         : copy.generating;
 
-  const cost = formatCreditsSoFar(status.creditsSoFar);
+  const cost = SHOW_RUNNING_COST ? formatCreditsSoFar(status.creditsSoFar) : undefined;
 
   return {
     label: `${copy.label} — ${elapsed}`,

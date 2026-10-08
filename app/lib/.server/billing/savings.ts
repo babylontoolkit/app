@@ -81,6 +81,12 @@ export interface SavingsInput {
 
   /** Credits actually debited — the LEDGER's number. Zero means nothing to compare. */
   creditsCharged: number;
+
+  /**
+   * The gateway that served the turn, as recorded. `Anthropic` IS the reference, so it saved nothing by
+   * definition — see the guard in {@link describeSavings}. Absent (an old row) keeps the ratio comparison.
+   */
+  provider?: string;
 }
 
 export interface Savings {
@@ -119,6 +125,18 @@ export interface Savings {
 export function describeSavings(input: SavingsInput): Savings | null {
   if (input.creditsCharged <= 0 || !(input.actualCostUsd > 0)) {
     return null;
+  }
+
+  /*
+   * 🔴 A turn Anthropic served is compared against ANTHROPIC — there is no discount to find (owner,
+   * 2026-10-04: *"How is there a saving on credits… are we not using Anthropic managed agent?"*). Running
+   * the ratio anyway printed a phantom saving on every managed turn: the managed cost prices cache writes
+   * at the 5-minute tier (1.25× input, `session-cost.ts`) while `costForRates` prices them at the 1-hour
+   * tier (2×), so the "reference" came out higher than the real bill for the same tokens from the same
+   * vendor. That is a pricing-formula difference, not a saving, and it was shown to users as one.
+   */
+  if (input.provider === 'Anthropic') {
+    return { basis: 'full_price', referenceCredits: input.creditsCharged, savedCredits: 0, percent: 0 };
   }
 
   const referenceRates = REFERENCE_RATES[input.model];

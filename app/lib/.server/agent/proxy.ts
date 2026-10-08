@@ -666,6 +666,9 @@ export interface AgentGeneration {
    */
   creationPhasesCompleted?: Promise<CreationPhaseId[] | undefined>;
 
+  /** With `creationPhasesCompleted`: the project's total spend when the first build finished, or null. */
+  creationCredits?: Promise<number | null | undefined>;
+
   /**
    * Managed engine (T10): the id the assistant message of this turn is STORED under, announced as soon
    * as it is known so the route can hand it to the client (`start_step`) — then the browser's copy and
@@ -3638,6 +3641,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
                 /* The raw USD settlement just computed — the same number recorded on the row. */
                 actualCostUsd: settlement.rawCostUsd,
                 creditsCharged: chargedAfterRefund,
+                provider: config.provider,
               }),
             }
           : null,

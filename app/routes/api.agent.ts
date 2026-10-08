@@ -586,6 +586,7 @@ async function streamGeneration(stream: DataStreamWriter, generation: AgentGener
   const creationPhasesCompleted = generation.creationPhasesCompleted
     ? await generation.creationPhasesCompleted
     : undefined;
+  const creationCredits = generation.creationCredits ? await generation.creationCredits : undefined;
 
   const annotations = buildTurnAnnotations(generation, {
     usage,
@@ -593,6 +594,7 @@ async function streamGeneration(stream: DataStreamWriter, generation: AgentGener
     workspaceSummary,
     settlement,
     creationPhasesCompleted,
+    creationCredits,
   });
 
   stream.writeMessageAnnotation(annotations.usage as any);

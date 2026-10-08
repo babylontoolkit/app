@@ -2,7 +2,7 @@ import { memo, Fragment } from 'react';
 import { Markdown } from './Markdown';
 import type { JSONValue } from 'ai';
 import Popover from '~/components/ui/Popover';
-import { decideBuildDoneBanner } from '~/lib/agent/build-done';
+import { decideBuildDoneBanner, formatCreationCost } from '~/lib/agent/build-done';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { WORK_DIR } from '~/utils/constants';
 import WithTooltip from '~/components/ui/Tooltip';
@@ -349,6 +349,11 @@ export const AssistantMessage = memo(
                 ? 'Every step is done: design, game code and front end. Open the Preview and press Play to try it.'
                 : 'Every step ran, but the final game check did not pass. Use the fix offered below to finish it.'}
             </p>
+            {formatCreationCost(buildDone.credits) && (
+              <p className="mt-1 text-xs tabular-nums text-bolt-elements-textTertiary">
+                {formatCreationCost(buildDone.credits)}
+              </p>
+            )}
             {buildDone.state === 'ready' && (
               <button
                 onClick={() => {

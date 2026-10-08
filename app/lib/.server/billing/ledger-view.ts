@@ -153,6 +153,7 @@ export function buildLedgerView(entries: LedgerEntry[], generations: GenerationR
        */
       actualCostUsd: record.rawCostUsd ?? 0,
       creditsCharged: Math.abs(entry.delta),
+      provider: record.provider,
     });
 
     if (!savings) {

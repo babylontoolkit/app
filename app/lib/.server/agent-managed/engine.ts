@@ -96,6 +96,7 @@ import {
 } from './settle';
 import { keepAlive } from '~/lib/.server/runtime/keep-alive';
 import { trackGeneration, trackManagedTurn } from '~/lib/.server/billing/in-flight';
+import { readProjectSpend } from '~/lib/.server/billing/project-spend';
 import { openRunningGeneration } from '~/lib/.server/billing/running-generation';
 import { ensureBillingSweep } from '~/lib/.server/billing/sweep';
 import { runManagedTurn, type ManagedTurnEnd, type ManagedTurnResult } from './turn';
@@ -749,6 +750,7 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
   const settlementPromise = deferred<AgentSettlement | null>();
   const workspaceSummary = deferred<AgentWorkspaceSummary | null>();
   const phasesCompleted = deferred<CreationPhaseId[] | undefined>();
+  const creationCredits = deferred<number | null | undefined>();
 
   /* What the turn is doing right now, from the session's own events — the status panel's step label. */
   const steps = createStepTracker();
@@ -1003,6 +1005,14 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
           }
         : null;
 
+      /*
+       * The build-done banner's total (owner, 2026-10-04): read AFTER this turn's debit and refund landed,
+       * so it includes them. Only on a finished first build; never throws (null when unreadable).
+       */
+      creationCredits.resolve(
+        completedPhases ? await readProjectSpend({ userId, projectId, context: request.context }) : undefined,
+      );
+
       settlementPromise.resolve(agentSettlement);
 
       try {
@@ -1054,6 +1064,7 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
           workspaceSummary: summary,
           settlement: agentSettlement,
           creationPhasesCompleted: completedPhases,
+          creationCredits: await creationCredits.promise,
         },
         fallbackTurnId: generationId,
       });
@@ -1063,6 +1074,7 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
   const generation: AgentGeneration = {
     engine: 'managed',
     creationPhasesCompleted: phasesCompleted.promise,
+    creationCredits: creationCredits.promise,
     textStream: run(),
     generationId,
     promptVersionId: activeVersionId ?? '',

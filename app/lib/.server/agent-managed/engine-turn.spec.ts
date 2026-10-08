@@ -1102,6 +1102,35 @@ describe('the first build is ONE managed turn (T9)', () => {
     expect(await run.generation.creationPhasesCompleted).toEqual(['design', 'game', 'frontend']);
   });
 
+  it('a finished first build stamps the project’s TOTAL — create fee + this turn’s charge (owner, 2026-10-04)', async () => {
+    await ledger.append({ userId: USER.id, delta: 10_000, reason: 'grant' });
+    await ledger.append({ userId: USER.id, delta: -150, reason: 'project_create', note: `project_create:${PROJECT}` });
+
+    fake.script = (async (api) => {
+      api.modelRequest(USAGE_1);
+      api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'Built.' }] });
+      api.endTurn();
+    }) satisfies Script;
+
+    const run = await drive(await turn({ owesBuild: true, messages: [userMessage(WORDS)] }));
+    const charged = (await run.generation.settlement)!.creditsCharged;
+
+    expect(charged).toBeGreaterThan(0);
+    expect(await run.generation.creationCredits).toBe(150 + charged);
+  });
+
+  it('CONTROL: an ordinary edit stamps no creation total', async () => {
+    fake.script = (async (api) => {
+      api.modelRequest(USAGE_1);
+      api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'ok' }] });
+      api.endTurn();
+    }) satisfies Script;
+
+    const run = await drive(await turn({ messages: [userMessage('faster')] }));
+
+    expect(await run.generation.creationCredits).toBeUndefined();
+  });
+
   it('only the phases the ROW still owes — never the body’s creationPhase', async () => {
     fake.script = (async (api) => {
       api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'Built.' }] });

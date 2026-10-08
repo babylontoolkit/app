@@ -38,6 +38,9 @@ export interface TurnAnnotationFacts {
 
   /** Managed first build only (T9) — the phases this one turn completed. */
   creationPhasesCompleted?: CreationPhaseId[];
+
+  /** With `creationPhasesCompleted` only: everything creating the project cost, this turn included. */
+  creationCredits?: number | null;
 }
 
 export interface TurnAnnotations {
@@ -90,6 +93,11 @@ export function buildTurnAnnotations(generation: AnnotatedGeneration, facts: Tur
 
         /* Present only on a managed first build that finished (T9); the client completes its plan from it. */
         ...(facts.creationPhasesCompleted ? { creationPhasesCompleted: facts.creationPhasesCompleted } : {}),
+
+        /* The build-done banner's total (create fee + build turns + renders, net of refunds). */
+        ...(facts.creationPhasesCompleted && typeof facts.creationCredits === 'number'
+          ? { creationCredits: facts.creationCredits }
+          : {}),
       },
     },
     agentWorkspace: facts.workspaceSummary ? { type: 'agentWorkspace', value: facts.workspaceSummary } : null,

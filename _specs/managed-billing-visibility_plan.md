@@ -59,3 +59,11 @@ All four tasks verified by independent subagents. A verifier finding (a tail sti
 starts could bill part of that turn under the old `_tail` id, so its refund would miss it) was fixed with
 `flushDetachedTail` at turn start, and re-verified with a mutation run. Accepted residual: usage still in
 flight at the flush lands in the new turn's settlement (≤ one request, under-bill direction only).
+
+## Amendment (owner, 2026-10-04)
+
+*"I don't think I like the amount of tokens spent so far on the main progress… if anything some end of project
+creation system message of the total cost of initial project creation."* D1's display is turned off
+(`SHOW_RUNNING_COST` in `agent-status.ts`; the heartbeat still carries the estimate). A finished first build now
+stamps `agentMeta.creationCredits` (`billing/project-spend.ts`: create fee + build turns + renders, net of refunds,
+read after the turn's own settlement) and the "Build complete" banner states it once.
